@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState, ReactNode, useCallback } from 'react';
-import { Project, Segment, MediaItem, Clip, TranscriptWord, PipelineStep, FolderRefs, AudioPart, ProjectMode, CapCutTemplate, AppSettings } from './types';
+import { Project, Segment, MediaItem, Clip, TranscriptWord, PipelineStep, FolderRefs, AudioPart, ProjectMode, CapCutTemplate, AppSettings, ClipAnim, ClipAnimationConfig, AnimCategory, VideoExportSettings } from './types';
 import { saveProject, getAllProjects, deleteProject, getHandle, getBlob, saveBlob, saveHandle, getStorageEstimate, saveTemplate, getAllTemplates, deleteTemplate, getSetting, setSetting } from './lib/db';
 import { genId, isAudioFile, isImageFile, isVideoFile, verifyPermission, readFileFromHandle, pickFolder, requestReadPermissions } from './lib/fs';
 import { decodeAndConcatAudio, detectSilences, snapToSilence, transcribeAudio, alignAllSegments, loadWhisperModel, decodeAudioParts, buildPartOffsets, transcribeAudioParts } from './lib/audio';
@@ -7,6 +7,7 @@ import { transcribeOnline, onlineAvailable } from './lib/online';
 import { transcribeNative, nativeAvailable } from './lib/native';
 import { parseMediaName, naturalSort, buildTimeline } from './lib/matching';
 import { exportCapCutDraft, exportSrtCsv, importTemplateFromFolder, simulateExportWithMockTemplate, ValidationReport } from './lib/export';
+import { exportVideo as renderVideoToMp4, DrawSource, CancelSignal } from './lib/render';
 
 interface LogEntry {
   time: number;
@@ -35,6 +36,12 @@ interface StoreContextValue {
   exportDraft: (draftsRoot: string, template: CapCutTemplate | null) => Promise<{ blob: Blob; report: ValidationReport; draftMeta: any }>;
   exportFallback: () => Promise<Blob>;
   simulateTestExport: (draftsRoot: string) => Promise<void>;
+  // ─── Animations (standalone) ───
+  setClipAnimation: (mediaId: string, slot: AnimCategory, anim: ClipAnim | null) => Promise<void>;
+  applyAnimation: (slot: AnimCategory, anim: ClipAnim, mediaIds?: string[]) => Promise<void>;
+  clearClipAnimations: (mediaId: string) => Promise<void>;
+  clearAllAnimations: () => Promise<void>;
+  exportVideo: (settings: VideoExportSettings, onProgress: (f: number, m: string) => void, signal: CancelSignal) => Promise<Blob>;
   importTemplate: () => Promise<CapCutTemplate | null>;
   templates: CapCutTemplate[];
   loadTemplates: () => Promise<void>;
@@ -847,6 +854,147 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     addLog('=== TEST SIMULATION END ===');
   }, [currentProject, collectMediaBlobs, addLog]);
 
+  // ─── Animations ──────────────────────────────────────────
+  // Animation config is keyed by media id (stable across "fix late images"
+  // retimes, which reuse the same MediaItem objects). Assigning animations
+  // never rebuilds the timeline, so the audio↔image matching is untouched.
+  const setClipAnimation = useCallback(async (mediaId: string, slot: AnimCategory, anim: ClipAnim | null) => {
+    setCurrentProject((prev) => {
+      if (!prev) return prev;
+      const map: Record<string, ClipAnimationConfig> = { ...(prev.clipAnimations || {}) };
+      const cfg: ClipAnimationConfig = { ...(map[mediaId] || {}) };
+      if (anim) {
+        cfg[slot] = anim;
+        // A combo animation replaces in+out; picking in/out clears any combo.
+        if (slot === 'combo') { delete cfg.in; delete cfg.out; }
+        else delete cfg.combo;
+      } else {
+        delete cfg[slot];
+      }
+      if (!cfg.in && !cfg.out && !cfg.combo) delete map[mediaId];
+      else map[mediaId] = cfg;
+      const next = { ...prev, clipAnimations: map, updatedAt: Date.now() };
+      persist(next);
+      return next;
+    });
+  }, [persist]);
+
+  const applyAnimation = useCallback(async (slot: AnimCategory, anim: ClipAnim, mediaIds?: string[]) => {
+    setCurrentProject((prev) => {
+      if (!prev) return prev;
+      // Default target: every image clip. (Videos can be targeted explicitly.)
+      const targets = mediaIds && mediaIds.length > 0
+        ? mediaIds
+        : Array.from(new Set(prev.clips.filter((c) => c.isImage).map((c) => c.media.id)));
+      const map: Record<string, ClipAnimationConfig> = { ...(prev.clipAnimations || {}) };
+      for (const id of targets) {
+        const cfg: ClipAnimationConfig = { ...(map[id] || {}) };
+        cfg[slot] = { ...anim };
+        if (slot === 'combo') { delete cfg.in; delete cfg.out; }
+        else delete cfg.combo;
+        map[id] = cfg;
+      }
+      const next = { ...prev, clipAnimations: map, updatedAt: Date.now() };
+      persist(next);
+      return next;
+    });
+    addLog(`Applied ${slot} animation "${anim.animId}" to ${mediaIds?.length ? mediaIds.length + ' selected' : 'all'} image(s).`);
+  }, [persist, addLog]);
+
+  const clearClipAnimations = useCallback(async (mediaId: string) => {
+    setCurrentProject((prev) => {
+      if (!prev) return prev;
+      const map = { ...(prev.clipAnimations || {}) };
+      delete map[mediaId];
+      const next = { ...prev, clipAnimations: map, updatedAt: Date.now() };
+      persist(next);
+      return next;
+    });
+  }, [persist]);
+
+  const clearAllAnimations = useCallback(async () => {
+    await updateProject({ clipAnimations: {} });
+    addLog('Cleared all animations.');
+  }, [updateProject, addLog]);
+
+  // ─── Standalone MP4 export ───────────────────────────────
+  const exportVideo = useCallback(async (
+    settings: VideoExportSettings,
+    onProgress: (f: number, m: string) => void,
+    signal: CancelSignal,
+  ): Promise<Blob> => {
+    if (!currentProject) throw new Error('No project open');
+    const project = currentProject;
+    if (!project.processed || project.clips.length === 0) {
+      throw new Error('Run Process first — there is no timeline to render yet.');
+    }
+
+    onProgress(0.02, 'Collecting media…');
+    const blobs = await collectMediaBlobs(project);
+
+    // Decode images to bitmaps (one per unique image clip).
+    onProgress(0.05, 'Decoding images…');
+    const imageBitmaps = new Map<string, DrawSource>();
+    const videoElements = new Map<string, HTMLVideoElement>();
+    const tempUrls: string[] = [];
+    const seen = new Set<string>();
+    for (const clip of project.clips) {
+      if (seen.has(clip.media.id)) continue;
+      seen.add(clip.media.id);
+      const blob = blobs.get(clip.media.id);
+      if (!blob) continue;
+      if (clip.isImage) {
+        try {
+          const bmp = await createImageBitmap(blob);
+          imageBitmaps.set(clip.media.id, bmp);
+        } catch { /* skip undecodable image */ }
+      } else {
+        const url = URL.createObjectURL(blob);
+        tempUrls.push(url);
+        const v = document.createElement('video');
+        v.muted = true; v.preload = 'auto'; v.src = url;
+        await new Promise<void>((resolve) => {
+          v.onloadeddata = () => resolve();
+          v.onerror = () => resolve();
+          setTimeout(resolve, 3000);
+        });
+        videoElements.set(clip.media.id, v);
+      }
+    }
+
+    // Decode all audio parts into a single buffer.
+    onProgress(0.1, 'Decoding audio…');
+    let audioBuffer: AudioBuffer | null = null;
+    try {
+      const audioBlobs = await resolveAllAudioBlobs(project);
+      if (audioBlobs.length > 0) {
+        const decoded = await decodeAudioParts(audioBlobs);
+        audioBuffer = decoded.buffer;
+      }
+    } catch (e: any) {
+      addLog(`Audio decode failed, exporting silent video: ${e.message}`, 'warn');
+    }
+
+    try {
+      const blob = await renderVideoToMp4({
+        clips: project.clips,
+        audioDuration: project.audioDuration,
+        clipAnimations: project.clipAnimations || {},
+        imageBitmaps,
+        videoElements,
+        audioBuffer,
+        settings,
+        onProgress,
+        signal,
+      });
+      addLog(`Video export complete: ${settings.resolution} @ ${settings.fps}fps, ${(blob.size / 1_048_576).toFixed(1)} MB`);
+      return blob;
+    } finally {
+      tempUrls.forEach((u) => URL.revokeObjectURL(u));
+      imageBitmaps.forEach((b) => { if ((b as any).close) (b as any).close(); });
+    }
+  }, [currentProject, collectMediaBlobs, resolveAllAudioBlobs, addLog]);
+
   const loadTemplates = useCallback(async () => {
     const tpls = await getAllTemplates();
     setTemplates(tpls);
@@ -955,6 +1103,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     exportDraft,
     exportFallback,
     simulateTestExport,
+    setClipAnimation,
+    applyAnimation,
+    clearClipAnimations,
+    clearAllAnimations,
+    exportVideo,
     importTemplate,
     templates,
     loadTemplates,
