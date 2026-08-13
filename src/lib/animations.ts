@@ -71,6 +71,12 @@ const IN: AnimEntry[] = [
   a('flash-in', 'Flash In', ['Glitch'], 0.5, (p) => ({ opacity: p < 0.3 ? p / 0.3 * 0.7 : clamp01(0.7 + (p - 0.3)), scale: lerp(1.05, 1, easeOut(p)) })),
   a('drift-in', 'Drift In', ['Cinematic'], 0.9, (p) => ({ translateX: lerp(0.12, 0, easeOut(p)), scale: 1.08, opacity: easeOut(p) })),
   a('skew-in', 'Tilt In', ['Light'], 0.6, (p) => ({ rotate: lerp(0.15, 0, easeOut(p)), scale: lerp(1.1, 1, easeOut(p)), opacity: clamp01(p * 1.6) })),
+  // ── New batch ──
+  a('pop-in', 'Pop In', ['Trending'], 0.6, (p) => ({ scale: lerp(0.7, 1, easeOutBack(p)), opacity: clamp01(p * 3) })),
+  a('swing-in', 'Swing In', ['Light'], 0.7, (p) => ({ rotate: lerp(0.4, 0, easeOutBack(p)), scale: lerp(0.9, 1, easeOut(p)), opacity: clamp01(p * 2) })),
+  a('zoom-rotate-in', 'Zoom Rotate In', ['Trending'], 0.7, (p) => ({ scale: lerp(0.5, 1, easeOut(p)), rotate: lerp(0.5, 0, easeOut(p)), opacity: clamp01(p * 1.6) })),
+  a('glide-in-left', 'Glide In', ['Cinematic'], 0.9, (p) => ({ translateX: lerp(0.9, 0, easeInOut(p)), scale: 1.05 })),
+  a('fly-in-tr', 'Fly In', ['Trending'], 0.7, (p) => ({ translateX: lerp(0.6, 0, easeOut(p)), translateY: lerp(-0.6, 0, easeOut(p)), scale: lerp(0.7, 1, easeOut(p)), opacity: clamp01(p * 1.6) })),
 ];
 
 // ─── OUT animations (p: 0→1, identity at 0) ──────────────────────
@@ -92,6 +98,12 @@ const OUT: AnimEntry[] = [
   a('zoom-blur-out', 'Zoom Blur Out', ['Trending', 'Cinematic'], 0.5, (p) => ({ scale: lerp(1, 1.9, easeInOut(p)), opacity: 1 - clamp01(p * 2.2) })),
   a('roll-out-right', 'Roll Out', ['Light'], 0.7, (p) => ({ rotate: lerp(0, 0.7, easeInOut(p)), translateX: lerp(0, 0.5, easeInOut(p)), opacity: 1 - clamp01(p * 1.6) })),
   a('drift-out', 'Drift Out', ['Cinematic'], 0.9, (p) => ({ translateX: lerp(0, -0.12, easeInOut(p)), scale: 1.08, opacity: 1 - easeInOut(p) })),
+  // ── New batch ──
+  a('pop-out', 'Pop Out', ['Trending'], 0.6, (p) => ({ scale: lerp(1, 0.7, easeInOut(p)), opacity: 1 - clamp01(p * 2) })),
+  a('swing-out', 'Swing Out', ['Light'], 0.7, (p) => ({ rotate: lerp(0, 0.4, easeInOut(p)), scale: lerp(1, 0.9, easeInOut(p)), opacity: 1 - clamp01(p * 1.6) })),
+  a('zoom-rotate-out', 'Zoom Rotate Out', ['Trending'], 0.7, (p) => ({ scale: lerp(1, 0.5, easeInOut(p)), rotate: lerp(0, 0.5, easeInOut(p)), opacity: 1 - clamp01(p * 1.6) })),
+  a('glide-out-right', 'Glide Out', ['Cinematic'], 0.9, (p) => ({ translateX: lerp(0, -0.9, easeInOut(p)), scale: 1.05 })),
+  a('fly-out-tr', 'Fly Out', ['Trending'], 0.7, (p) => ({ translateX: lerp(0, 0.6, easeInOut(p)), translateY: lerp(0, -0.6, easeInOut(p)), scale: lerp(1, 0.7, easeInOut(p)), opacity: 1 - clamp01(p * 1.6) })),
 ];
 
 // ─── COMBO animations (continuous across the whole clip) ─────────
@@ -117,6 +129,15 @@ const COMBO: AnimEntry[] = [
   a('drift-cine', 'Cinematic Drift', ['Cinematic', 'Camera'], 0, (p) => ({ scale: 1.14, translateX: lerp(-0.05, 0.05, p), translateY: lerp(0.02, -0.02, p) })),
   a('heartbeat', 'Heartbeat', ['Light'], 0, (p) => ({ scale: 1.05 + 0.03 * Math.max(0, Math.sin(p * TAU * 4)) })),
   a('parallax', 'Parallax', ['3D', 'Camera'], 0, (p) => ({ scale: 1.16, translateX: 0.06 * Math.sin(p * TAU * 0.5), rotate: 0.01 * Math.sin(p * TAU) })),
+  // ── New batch (cinematic image moves) ──
+  a('glide-pan-lr', 'Glide Pan', ['Cinematic', 'Camera'], 0, (p) => ({ scale: 1.18, translateX: lerp(-0.08, 0.08, easeInOut(p)) })),
+  a('glide-diag', 'Diagonal Glide', ['Cinematic', 'Camera'], 0, (p) => ({ scale: 1.2, translateX: lerp(-0.06, 0.06, easeInOut(p)), translateY: lerp(-0.04, 0.04, easeInOut(p)) })),
+  a('orbit', 'Orbit', ['3D', 'Camera'], 0, (p) => ({ scale: 1.16, translateX: 0.05 * Math.sin(p * TAU), translateY: 0.05 * Math.cos(p * TAU) })),
+  a('zoom-rotate', 'Zoom Rotate', ['Cinematic'], 0, (p) => ({ scale: lerp(1.05, 1.2, p), rotate: lerp(-0.03, 0.03, p) })),
+  a('pendulum', 'Pendulum', ['Light', '3D'], 0, (p) => ({ scale: 1.1, rotate: 0.05 * Math.sin(p * TAU) })),
+  a('vertigo', 'Dolly Zoom', ['Cinematic', '3D'], 0, (p) => ({ scale: lerp(1.02, 1.3, easeInOut(p)) })),
+  a('ripple-zoom', 'Ripple Zoom', ['Light'], 0, (p) => ({ scale: 1.1 + 0.04 * Math.sin(p * TAU * 2) })),
+  a('push-in-tl', 'Push-In Corner', ['Cinematic', 'Camera'], 0, (p) => ({ scale: lerp(1.02, 1.2, p), translateX: lerp(0, -0.05, p), translateY: lerp(0, -0.05, p) })),
 ];
 
 function a(id: string, name: string, tags: string[], defaultDuration: number, fn: AnimFn): AnimEntry {

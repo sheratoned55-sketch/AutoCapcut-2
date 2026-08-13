@@ -151,7 +151,7 @@ export function renderTimelineFrame(ctx: Ctx2D, time: number, r: TimelineRenderC
         scale: base.scale * layer.scale,
         translateX: base.translateX + layer.dx,
         translateY: base.translateY + layer.dy,
-        rotate: base.rotate,
+        rotate: base.rotate + (layer.rotate || 0),
         opacity: base.opacity * layer.alpha,
       };
       drawFrame(ctx, r.getSource(c.media.id), merged, r.W, r.H, r.fit, false);

@@ -22,6 +22,8 @@ export interface TransLayer {
   dy: number;
   /** extra scale multiplier */
   scale: number;
+  /** extra rotation in radians */
+  rotate?: number;
 }
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -77,6 +79,27 @@ const T: TransEntry[] = [
   t('whip-left', 'Whip Left', ['Trending'], 0.35, (p) => [
     { which: 'prev', alpha: 1 - p, dx: -0.4 * p, dy: 0, scale: 1 },
     { which: 'curr', alpha: p, dx: 0.4 * (1 - p), dy: 0, scale: 1 },
+  ]),
+  // ── New batch ──
+  t('spin', 'Spin', ['Trending'], 0.5, (p) => [
+    { which: 'prev', alpha: 1 - easeInOut(p), dx: 0, dy: 0, scale: 1 + 0.3 * p, rotate: 0.6 * p },
+    { which: 'curr', alpha: easeInOut(p), dx: 0, dy: 0, scale: lerp(1.3, 1, p), rotate: lerp(-0.6, 0, p) },
+  ]),
+  t('zoom-blur', 'Zoom Blur', ['Trending', 'Camera'], 0.4, (p) => [
+    { which: 'prev', alpha: 1 - easeInOut(p), dx: 0, dy: 0, scale: lerp(1, 1.6, p) },
+    { which: 'curr', alpha: easeInOut(p), dx: 0, dy: 0, scale: lerp(1.6, 1, p) },
+  ]),
+  t('slide-diag', 'Diagonal Slide', ['Camera'], 0.5, (p) => [
+    { which: 'prev', alpha: 1, dx: -easeInOut(p), dy: -easeInOut(p), scale: 1 },
+    { which: 'curr', alpha: 1, dx: 1 - easeInOut(p), dy: 1 - easeInOut(p), scale: 1 },
+  ]),
+  t('glitch', 'Glitch', ['Glitch'], 0.35, (p) => [
+    { which: 'prev', alpha: 1 - p, dx: 0.02 * Math.sin(p * 60), dy: 0.01 * Math.cos(p * 50), scale: 1 },
+    { which: 'curr', alpha: p, dx: 0.02 * Math.cos(p * 55), dy: 0, scale: 1 },
+  ]),
+  t('push-up', 'Push Up', ['Camera'], 0.5, (p) => [
+    { which: 'prev', alpha: 1, dx: 0, dy: -easeInOut(p), scale: 1 },
+    { which: 'curr', alpha: 1, dx: 0, dy: 1 - easeInOut(p), scale: 1 },
   ]),
 ];
 
