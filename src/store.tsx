@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState, ReactNode, useCallback } from 'react';
-import { Project, Segment, MediaItem, Clip, TranscriptWord, PipelineStep, FolderRefs, AudioPart, ProjectMode, CapCutTemplate, AppSettings, ClipAnim, ClipAnimationConfig, AnimCategory, VideoExportSettings } from './types';
+import { Project, Segment, MediaItem, Clip, TranscriptWord, PipelineStep, FolderRefs, AudioPart, ProjectMode, CapCutTemplate, AppSettings, ClipAnim, ClipAnimationConfig, ClipTransition, AnimCategory, VideoExportSettings } from './types';
 import { saveProject, getAllProjects, deleteProject, getHandle, getBlob, saveBlob, saveHandle, getStorageEstimate, saveTemplate, getAllTemplates, deleteTemplate, getSetting, setSetting } from './lib/db';
 import { genId, isAudioFile, isImageFile, isVideoFile, verifyPermission, readFileFromHandle, pickFolder, requestReadPermissions } from './lib/fs';
 import { decodeAndConcatAudio, detectSilences, snapToSilence, transcribeAudio, alignAllSegments, loadWhisperModel, decodeAudioParts, buildPartOffsets, transcribeAudioParts } from './lib/audio';
@@ -39,8 +39,14 @@ interface StoreContextValue {
   // ─── Animations (standalone) ───
   setClipAnimation: (mediaId: string, slot: AnimCategory, anim: ClipAnim | null) => Promise<void>;
   applyAnimation: (slot: AnimCategory, anim: ClipAnim, mediaIds?: string[]) => Promise<void>;
+  applyAnimationSequence: (items: { slot: AnimCategory; anim: ClipAnim }[], mediaIds?: string[]) => Promise<void>;
   clearClipAnimations: (mediaId: string) => Promise<void>;
   clearAllAnimations: () => Promise<void>;
+  toggleFavoriteAnimation: (animId: string) => Promise<void>;
+  // ─── Transitions ───
+  setTransition: (mediaId: string, trans: ClipTransition | null) => Promise<void>;
+  applyTransition: (trans: ClipTransition, mediaIds?: string[]) => Promise<void>;
+  clearAllTransitions: () => Promise<void>;
   exportVideo: (settings: VideoExportSettings, onProgress: (f: number, m: string) => void, signal: CancelSignal) => Promise<Blob>;
   importTemplate: () => Promise<CapCutTemplate | null>;
   templates: CapCutTemplate[];
@@ -917,6 +923,86 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     addLog('Cleared all animations.');
   }, [updateProject, addLog]);
 
+  // Apply an ORDERED list of animations across the target images, cycling
+  // through the list in timeline order — e.g. [A,B,C] → img1=A, img2=B,
+  // img3=C, img4=A … This is the "sequence-wise multiple animations" flow.
+  const applyAnimationSequence = useCallback(async (items: { slot: AnimCategory; anim: ClipAnim }[], mediaIds?: string[]) => {
+    if (items.length === 0) return;
+    setCurrentProject((prev) => {
+      if (!prev) return prev;
+      // Ordered, de-duplicated list of target media ids (timeline order).
+      const order: string[] = [];
+      const seen = new Set<string>();
+      const wanted = mediaIds && mediaIds.length > 0 ? new Set(mediaIds) : null;
+      for (const c of prev.clips) {
+        if (!c.isImage || seen.has(c.media.id)) continue;
+        if (wanted && !wanted.has(c.media.id)) continue;
+        seen.add(c.media.id);
+        order.push(c.media.id);
+      }
+      const map: Record<string, ClipAnimationConfig> = { ...(prev.clipAnimations || {}) };
+      order.forEach((id, i) => {
+        const { slot, anim } = items[i % items.length];
+        const cfg: ClipAnimationConfig = { ...(map[id] || {}) };
+        cfg[slot] = { ...anim };
+        if (slot === 'combo') { delete cfg.in; delete cfg.out; }
+        else delete cfg.combo;
+        map[id] = cfg;
+      });
+      const next = { ...prev, clipAnimations: map, updatedAt: Date.now() };
+      persist(next);
+      return next;
+    });
+    addLog(`Applied a sequence of ${items.length} animation(s) across ${mediaIds?.length ? mediaIds.length + ' selected' : 'all'} image(s).`);
+  }, [persist, addLog]);
+
+  const toggleFavoriteAnimation = useCallback(async (animId: string) => {
+    const base = settings || { draftsRootPath: '', username: '' };
+    const favs = new Set(base.favoriteAnimations || []);
+    if (favs.has(animId)) favs.delete(animId); else favs.add(animId);
+    const next = { ...base, favoriteAnimations: Array.from(favs) };
+    await setSetting('appSettings', next);
+    setSettings(next);
+  }, [settings]);
+
+  // ─── Transitions ─────────────────────────────────────────
+  const setTransition = useCallback(async (mediaId: string, trans: ClipTransition | null) => {
+    setCurrentProject((prev) => {
+      if (!prev) return prev;
+      const map = { ...(prev.transitions || {}) };
+      if (trans) map[mediaId] = trans; else delete map[mediaId];
+      const next = { ...prev, transitions: map, updatedAt: Date.now() };
+      persist(next);
+      return next;
+    });
+  }, [persist]);
+
+  const applyTransition = useCallback(async (trans: ClipTransition, mediaIds?: string[]) => {
+    setCurrentProject((prev) => {
+      if (!prev) return prev;
+      // A transition plays at a clip's start, so skip the very first clip.
+      const imageClipIds: string[] = [];
+      const seen = new Set<string>();
+      prev.clips.forEach((c, idx) => {
+        if (idx === 0 || seen.has(c.media.id)) return;
+        seen.add(c.media.id);
+        imageClipIds.push(c.media.id);
+      });
+      const targets = mediaIds && mediaIds.length > 0 ? mediaIds.filter((id) => id !== prev.clips[0]?.media.id) : imageClipIds;
+      const map = { ...(prev.transitions || {}) };
+      for (const id of targets) map[id] = { ...trans };
+      const next = { ...prev, transitions: map, updatedAt: Date.now() };
+      persist(next);
+      return next;
+    });
+    addLog(`Applied "${trans.transId}" transition to ${mediaIds?.length ? mediaIds.length + ' selected' : 'all'} clip(s).`);
+  }, [persist, addLog]);
+
+  const clearAllTransitions = useCallback(async () => {
+    await updateProject({ transitions: {} });
+    addLog('Cleared all transitions.');
+  }, [updateProject, addLog]);
+
   // ─── Standalone MP4 export ───────────────────────────────
   const exportVideo = useCallback(async (
     settings: VideoExportSettings,
@@ -980,6 +1066,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         clips: project.clips,
         audioDuration: project.audioDuration,
         clipAnimations: project.clipAnimations || {},
+        transitions: project.transitions || {},
         imageBitmaps,
         videoElements,
         audioBuffer,
@@ -1105,8 +1192,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     simulateTestExport,
     setClipAnimation,
     applyAnimation,
+    applyAnimationSequence,
     clearClipAnimations,
     clearAllAnimations,
+    toggleFavoriteAnimation,
+    setTransition,
+    applyTransition,
+    clearAllTransitions,
     exportVideo,
     importTemplate,
     templates,

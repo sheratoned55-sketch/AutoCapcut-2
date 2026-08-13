@@ -62,6 +62,15 @@ const IN: AnimEntry[] = [
   a('bounce-in', 'Bounce In', ['Trending'], 0.8, (p) => ({ scale: lerp(0.5, 1, easeOutBack(p)), opacity: clamp01(p * 2) })),
   a('mask-wipe-in', 'Reveal', ['Mask'], 0.7, (p) => ({ scale: lerp(1.12, 1, easeOut(p)), opacity: easeInOut(p) })),
   a('shake-in', 'Shake In', ['Glitch'], 0.6, (p) => ({ translateX: (1 - p) * 0.05 * Math.sin(p * 40), opacity: clamp01(p * 2), scale: lerp(1.1, 1, easeOut(p)) })),
+  // ── More (CapCut / Filmora style, tuned for AI-story image channels) ──
+  a('drop-in', 'Drop In', ['Trending'], 0.8, (p) => ({ translateY: lerp(-0.7, 0, easeOutBack(p)), opacity: clamp01(p * 2) })),
+  a('rise-in', 'Rise Up', ['Trending', 'Cinematic'], 0.7, (p) => ({ translateY: lerp(0.4, 0, easeOut(p)), scale: lerp(1.08, 1, easeOut(p)), opacity: easeOut(p) })),
+  a('expand-in', 'Expand', ['Basic'], 0.6, (p) => ({ scale: easeOut(p), opacity: clamp01(p * 2) })),
+  a('zoom-blur-in', 'Zoom Blur In', ['Trending', 'Cinematic'], 0.5, (p) => ({ scale: lerp(1.9, 1, easeOut(p)), opacity: clamp01(p * 2.2) })),
+  a('roll-in-left', 'Roll In', ['Light'], 0.7, (p) => ({ rotate: lerp(-0.7, 0, easeOut(p)), translateX: lerp(-0.5, 0, easeOut(p)), opacity: clamp01(p * 1.6) })),
+  a('flash-in', 'Flash In', ['Glitch'], 0.5, (p) => ({ opacity: p < 0.3 ? p / 0.3 * 0.7 : clamp01(0.7 + (p - 0.3)), scale: lerp(1.05, 1, easeOut(p)) })),
+  a('drift-in', 'Drift In', ['Cinematic'], 0.9, (p) => ({ translateX: lerp(0.12, 0, easeOut(p)), scale: 1.08, opacity: easeOut(p) })),
+  a('skew-in', 'Tilt In', ['Light'], 0.6, (p) => ({ rotate: lerp(0.15, 0, easeOut(p)), scale: lerp(1.1, 1, easeOut(p)), opacity: clamp01(p * 1.6) })),
 ];
 
 // ─── OUT animations (p: 0→1, identity at 0) ──────────────────────
@@ -76,6 +85,13 @@ const OUT: AnimEntry[] = [
   a('rotate-out', 'Rotate Out', ['Light'], 0.7, (p) => ({ rotate: lerp(0, 0.35, easeInOut(p)), scale: lerp(1, 0.8, easeInOut(p)), opacity: 1 - clamp01(p * 1.3) })),
   a('spin-out', 'Spin Out', ['Glitch'], 0.7, (p) => ({ rotate: lerp(0, TAU, easeInOut(p)), scale: lerp(1, 0.4, easeInOut(p)), opacity: 1 - clamp01(p * 1.5) })),
   a('mask-wipe-out', 'Conceal', ['Mask'], 0.7, (p) => ({ scale: lerp(1, 1.12, easeInOut(p)), opacity: 1 - easeInOut(p) })),
+  // ── More ──
+  a('drop-out', 'Drop Out', ['Trending'], 0.7, (p) => ({ translateY: lerp(0, 0.7, easeInOut(p)), opacity: 1 - clamp01(p * 1.4) })),
+  a('rise-out', 'Rise Out', ['Cinematic'], 0.7, (p) => ({ translateY: lerp(0, -0.4, easeInOut(p)), scale: lerp(1, 1.08, easeInOut(p)), opacity: 1 - easeInOut(p) })),
+  a('expand-out', 'Expand Out', ['Basic'], 0.6, (p) => ({ scale: lerp(1, 1.8, easeInOut(p)), opacity: 1 - clamp01(p * 1.4) })),
+  a('zoom-blur-out', 'Zoom Blur Out', ['Trending', 'Cinematic'], 0.5, (p) => ({ scale: lerp(1, 1.9, easeInOut(p)), opacity: 1 - clamp01(p * 2.2) })),
+  a('roll-out-right', 'Roll Out', ['Light'], 0.7, (p) => ({ rotate: lerp(0, 0.7, easeInOut(p)), translateX: lerp(0, 0.5, easeInOut(p)), opacity: 1 - clamp01(p * 1.6) })),
+  a('drift-out', 'Drift Out', ['Cinematic'], 0.9, (p) => ({ translateX: lerp(0, -0.12, easeInOut(p)), scale: 1.08, opacity: 1 - easeInOut(p) })),
 ];
 
 // ─── COMBO animations (continuous across the whole clip) ─────────
@@ -92,6 +108,15 @@ const COMBO: AnimEntry[] = [
   a('breathe', 'Breathe', ['Light'], 0, (p) => ({ scale: 1.05 + 0.05 * (0.5 - 0.5 * Math.cos(p * TAU * 2)) })),
   a('shake', 'Shake', ['Glitch'], 0, (p) => ({ scale: 1.06, translateX: 0.008 * Math.sin(p * 90), translateY: 0.008 * Math.cos(p * 83) })),
   a('spin-slow', 'Spin', ['Glitch', 'Camera'], 0, (p) => ({ scale: 1.15, rotate: p * 0.2 })),
+  // ── Ken-Burns variants + cinematic moves (the staples for AI-story videos) ──
+  a('kb-tl-br', 'Zoom TL→BR', ['Cinematic', 'Camera'], 0, (p) => ({ scale: lerp(1.06, 1.22, p), translateX: lerp(0.05, -0.05, p), translateY: lerp(0.05, -0.05, p) })),
+  a('kb-tr-bl', 'Zoom TR→BL', ['Cinematic', 'Camera'], 0, (p) => ({ scale: lerp(1.06, 1.22, p), translateX: lerp(-0.05, 0.05, p), translateY: lerp(0.05, -0.05, p) })),
+  a('kb-out-slow', 'Slow Pull-Out', ['Cinematic', 'Camera'], 0, (p) => ({ scale: lerp(1.25, 1.05, p) })),
+  a('kb-in-slow', 'Slow Push-In', ['Cinematic', 'Camera'], 0, (p) => ({ scale: lerp(1.02, 1.16, p) })),
+  a('float', 'Float', ['Cinematic', 'Light'], 0, (p) => ({ scale: 1.1, translateY: 0.02 * Math.sin(p * TAU) })),
+  a('drift-cine', 'Cinematic Drift', ['Cinematic', 'Camera'], 0, (p) => ({ scale: 1.14, translateX: lerp(-0.05, 0.05, p), translateY: lerp(0.02, -0.02, p) })),
+  a('heartbeat', 'Heartbeat', ['Light'], 0, (p) => ({ scale: 1.05 + 0.03 * Math.max(0, Math.sin(p * TAU * 4)) })),
+  a('parallax', 'Parallax', ['3D', 'Camera'], 0, (p) => ({ scale: 1.16, translateX: 0.06 * Math.sin(p * TAU * 0.5), rotate: 0.01 * Math.sin(p * TAU) })),
 ];
 
 function a(id: string, name: string, tags: string[], defaultDuration: number, fn: AnimFn): AnimEntry {
@@ -112,6 +137,15 @@ export const NONE_ID = '__none__';
 
 export function catalogFor(category: AnimCategory): AnimationDef[] {
   return ALL.filter((e) => e.category === category).map(stripFn);
+}
+
+/** Every animation across all categories (for building a favorites list). */
+export function allAnims(): AnimationDef[] {
+  return ALL.map(stripFn);
+}
+
+export function animCategory(id: string): AnimCategory | null {
+  return BY_ID.get(id)?.category ?? null;
 }
 
 export function allTags(category: AnimCategory): string[] {
@@ -164,7 +198,10 @@ export function computeTransform(
   if (cfg.combo && cfg.combo.animId !== NONE_ID) {
     const e = BY_ID.get(cfg.combo.animId);
     if (e) {
-      const p = clamp01(localTime / clipDur);
+      // Combo runs across its duration window (or the whole clip when
+      // fullDuration), then holds the final pose for the rest of the clip.
+      const window = cfg.combo.fullDuration ? clipDur : Math.min(cfg.combo.duration || clipDur, clipDur);
+      const p = window > 0 ? clamp01(localTime / window) : 0;
       t = merge(t, e.fn(p));
     }
     return t;

@@ -5,9 +5,10 @@ A standalone auto-editor — a Windows desktop app. Drop in your audio and media
 ## What it does
 
 - **Auto-timing:** aligns your script to the audio word-by-word, so every image lasts exactly as long as its part is spoken. (Untouched — this is the core that already works.)
-- **Built-in animations:** an **Animation** tab with professional In / Out / Combo animations (Zoom, Fade, Slide, Rotate, Ken-Burns pan, Rock, Pulse, Shake, and more), organised by category and tags. Pick one, set its duration (or "full image duration"), and apply it to all images or just the ones you select. Images whose animation is longer than the image are highlighted so you can adjust them manually.
-- **Live preview:** the Preview tab plays your slideshow with animations, synced to the audio.
-- **Standalone MP4 export:** render straight to an MP4 (**480p, 720p, 1080p, or 2K at 30 or 60 fps**) — images, audio and animations baked in, no external editor needed. Uses the browser/Electron WebCodecs H.264 encoder.
+- **Built-in animations (56):** an **Animation** tab with professional In / Out / Combo animations (Zoom, Fade, Slide, Rotate, Ken-Burns pans, cinematic drifts, Float, Pulse, Shake, and more), organised by category and tags. **Star favorites**, set a duration (combos included), and apply to all images, the ones you select, or as a **sequence** that spreads different animations across your images in order. Images whose animation is longer than the image are highlighted so you can adjust them manually.
+- **Transitions (10):** dissolve, fade to black/white, slides, zoom in/out and whip — applied between images with an adjustable duration.
+- **Live preview:** the Preview tab plays your slideshow with animations and transitions, synced to the audio, in your chosen aspect ratio.
+- **Standalone MP4 export:** render straight to an MP4 (**480p, 720p, 1080p, or 2K at 30 or 60 fps**, aspect ratio **16:9 / 9:16 / 1:1 / 4:3**, image fit cover/contain/stretch) — images, audio, animations and transitions baked in, no external editor needed. Uses the browser/Electron WebCodecs H.264 encoder.
 - **CapCut draft export (optional):** still available if you'd rather finish in CapCut.
 - **Projects:** create, open, edit and delete projects; everything is stored locally.
 

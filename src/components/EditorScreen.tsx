@@ -2,15 +2,17 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   ArrowLeft, Play, Pause, Download, RefreshCw, Loader2, CheckCircle2, AlertCircle,
   ChevronRight, FileVideo, FileImage, Clock, AlertTriangle, Settings, Terminal,
-  RotateCw, FolderOpen, X, Plus, Upload, Check, AlertOctagon, Trash2, Sparkles, Film
+  RotateCw, FolderOpen, X, Plus, Upload, Check, AlertOctagon, Trash2, Sparkles, Film,
+  Star, Shuffle
 } from 'lucide-react';
 import { useStore } from '../store';
-import { Segment, Clip, CapCutTemplate, AnimCategory, ClipAnim, VideoExportSettings, ResolutionPreset } from '../types';
+import { Segment, Clip, CapCutTemplate, AnimCategory, ClipAnim, ClipTransition, VideoExportSettings, ResolutionPreset, AspectRatio, ImageFit } from '../types';
 import { parseScriptFull, detectScriptMode, parseSegments, verifySegmentFill, segmentPreview, type SegmentVerification } from '../lib/matching';
 import { ValidationReport } from '../lib/export';
 import { buildPartOffsets } from '../lib/audio';
-import { catalogFor, allTags, animName, computeTransform, isOverDuration, hasAnimation, getAnim, NONE_ID } from '../lib/animations';
-import { drawFrame, RESOLUTIONS } from '../lib/render';
+import { catalogFor, allTags, allAnims, animCategory, animName, computeTransform, isOverDuration, hasAnimation, getAnim, NONE_ID } from '../lib/animations';
+import { drawFrame, renderTimelineFrame, RESOLUTIONS, frameDims, type DrawSource, type TimelineRenderCtx } from '../lib/render';
+import { transitionCatalog, transitionTags, transitionName, transitionDefaultDuration, TRANS_NONE_ID } from '../lib/transitions';
 
 function fmtTime(s: number): string {
   if (!s || isNaN(s)) return '0:00.0';
@@ -765,14 +767,23 @@ function TimelinePanel({ clips, segments, audioDuration, selectedClip, onSelectC
 
 function AnimationPanel() {
   const store = useStore();
-  const { currentProject: project } = store;
+  const { currentProject: project, settings } = store;
 
+  const [mode, setMode] = useState<'animate' | 'transition'>('animate');
   const [category, setCategory] = useState<AnimCategory>('combo');
   const [tag, setTag] = useState('All');
+  const [showFavorites, setShowFavorites] = useState(false);
   const [selectedAnimId, setSelectedAnimId] = useState<string>('');
   const [duration, setDuration] = useState(0.7);
   const [fullDuration, setFullDuration] = useState(false);
   const [selectedMedia, setSelectedMedia] = useState<Set<string>>(new Set());
+  const [sequence, setSequence] = useState<{ slot: AnimCategory; anim: ClipAnim }[]>([]);
+  // Transitions
+  const [transId, setTransId] = useState<string>('');
+  const [transTag, setTransTag] = useState('All');
+  const [transDuration, setTransDuration] = useState(0.5);
+
+  const favorites = new Set(settings?.favoriteAnimations || []);
 
   // Unique image clips in timeline order.
   const imageClips = useMemo(() => {
@@ -800,123 +811,151 @@ function AnimationPanel() {
     );
   }
 
-  const catalog = catalogFor(category).filter((a) => tag === 'All' || a.tags.includes(tag));
-  const tags = allTags(category);
   const isCombo = category === 'combo';
+  const catalog = (showFavorites ? allAnims().filter((a) => favorites.has(a.id)) : catalogFor(category))
+    .filter((a) => showFavorites || tag === 'All' || a.tags.includes(tag));
+  const tags = allTags(category);
 
   const currentAnim: ClipAnim | null = selectedAnimId
-    ? { animId: selectedAnimId, duration, fullDuration: isCombo ? true : fullDuration }
+    ? { animId: selectedAnimId, duration, fullDuration }
     : null;
 
   const pickAnim = (id: string) => {
     setSelectedAnimId(id);
     const def = getAnim(id);
     if (def && def.defaultDuration > 0) setDuration(def.defaultDuration);
+    else if (def && def.defaultDuration === 0) setDuration(2);
+  };
+  const slotOf = (id: string): AnimCategory => animCategory(id) || category;
+
+  const applyAll = () => { if (currentAnim) store.applyAnimation(slotOf(selectedAnimId), currentAnim); };
+  const applySelected = () => {
+    if (currentAnim && selectedMedia.size > 0) store.applyAnimation(slotOf(selectedAnimId), currentAnim, Array.from(selectedMedia));
+  };
+  const addToSequence = () => { if (currentAnim) setSequence((s) => [...s, { slot: slotOf(selectedAnimId), anim: currentAnim }]); };
+  const applySequence = (toSelected: boolean) => {
+    if (sequence.length === 0) return;
+    store.applyAnimationSequence(sequence, toSelected ? Array.from(selectedMedia) : undefined);
   };
 
-  const applyAll = () => {
-    if (!currentAnim) return;
-    store.applyAnimation(category, currentAnim);
-  };
-  const applySelected = () => {
-    if (!currentAnim || selectedMedia.size === 0) return;
-    store.applyAnimation(category, currentAnim, Array.from(selectedMedia));
-  };
+  const currentTrans: ClipTransition | null = transId && transId !== TRANS_NONE_ID ? { transId, duration: transDuration } : null;
+  const applyTransAll = () => { if (currentTrans) store.applyTransition(currentTrans); };
+  const applyTransSelected = () => { if (currentTrans && selectedMedia.size > 0) store.applyTransition(currentTrans, Array.from(selectedMedia)); };
 
   const toggleSelect = (id: string) => {
-    setSelectedMedia((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
+    setSelectedMedia((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   };
 
   const animatedCount = imageClips.filter((c) => hasAnimation(project.clipAnimations?.[c.media.id])).length;
+  const transCount = imageClips.filter((c) => project.transitions?.[c.media.id]?.transId && project.transitions[c.media.id].transId !== TRANS_NONE_ID).length;
+  const transCatalog = transitionCatalog().filter((t) => transTag === 'All' || t.tags.includes(transTag));
 
   return (
     <div className="p-4 space-y-4">
-      {/* Intro */}
-      <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-medium text-neutral-200 flex items-center gap-2">
-            <Sparkles size={16} className="text-purple-400" /> Animations
-          </h3>
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-neutral-500">{animatedCount}/{imageClips.length} images animated</span>
-            {animatedCount > 0 && (
-              <button onClick={() => store.clearAllAnimations()} className="text-xs text-red-400 hover:text-red-300">
-                Clear all
+      {/* Mode toggle */}
+      <div className="flex gap-1 bg-neutral-900 border border-neutral-800 rounded-xl p-1 w-fit">
+        {(['animate', 'transition'] as const).map((m) => (
+          <button
+            key={m}
+            onClick={() => { setMode(m); setSelectedMedia(new Set()); }}
+            className={`px-5 py-1.5 text-sm font-medium rounded-lg transition-colors ${mode === m ? 'bg-purple-600 text-white' : 'text-neutral-400 hover:text-neutral-200'}`}
+          >
+            {m === 'animate' ? 'Animations' : 'Transitions'}
+          </button>
+        ))}
+      </div>
+
+      {mode === 'animate' ? (<>
+        {/* Intro */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-medium text-neutral-200 flex items-center gap-2">
+              <Sparkles size={16} className="text-purple-400" /> Animations
+            </h3>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-neutral-500">{animatedCount}/{imageClips.length} images animated</span>
+              {animatedCount > 0 && (
+                <button onClick={() => store.clearAllAnimations()} className="text-xs text-red-400 hover:text-red-300">Clear all</button>
+              )}
+            </div>
+          </div>
+          <p className="text-xs text-neutral-500 mt-1">
+            Built-in, professional animations — no CapCut needed. Star ⭐ favorites, set a duration (combos too),
+            then apply to all images or the ones you select. Or build a <strong>sequence</strong> to spread different
+            animations across your images in order.
+          </p>
+        </div>
+
+        {/* Category tabs + favorites */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex gap-1 bg-neutral-900 border border-neutral-800 rounded-xl p-1 w-fit">
+            <button
+              onClick={() => setShowFavorites((v) => !v)}
+              title="Favorites"
+              className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${showFavorites ? 'bg-yellow-500/20 text-yellow-300' : 'text-neutral-400 hover:text-neutral-200'}`}
+            >
+              <Star size={14} className={showFavorites ? 'fill-yellow-400 text-yellow-400' : ''} />
+            </button>
+            {(['in', 'out', 'combo'] as const).map((c) => (
+              <button
+                key={c}
+                onClick={() => { setCategory(c); setShowFavorites(false); setSelectedAnimId(''); }}
+                className={`px-5 py-1.5 text-sm font-medium rounded-lg capitalize transition-colors ${!showFavorites && category === c ? 'bg-neutral-700 text-white' : 'text-neutral-400 hover:text-neutral-200'}`}
+              >
+                {c}
               </button>
-            )}
+            ))}
           </div>
         </div>
-        <p className="text-xs text-neutral-500 mt-1">
-          Built-in, professional animations — no CapCut needed. Pick one, set its duration, then apply to all
-          images or just the ones you select. Combos play across the whole image; In/Out play at the start/end.
-        </p>
-      </div>
 
-      {/* Category tabs */}
-      <div className="flex gap-1 bg-neutral-900 border border-neutral-800 rounded-xl p-1 w-fit">
-        {(['in', 'out', 'combo'] as const).map((c) => (
-          <button
-            key={c}
-            onClick={() => { setCategory(c); setSelectedAnimId(''); }}
-            className={`px-5 py-1.5 text-sm font-medium rounded-lg capitalize transition-colors ${
-              category === c ? 'bg-neutral-700 text-white' : 'text-neutral-400 hover:text-neutral-200'
-            }`}
-          >
-            {c}
-          </button>
-        ))}
-      </div>
-
-      {/* Tag filters */}
-      <div className="flex gap-2 flex-wrap">
-        {tags.map((t) => (
-          <button
-            key={t}
-            onClick={() => setTag(t)}
-            className={`px-3 py-1 text-xs rounded-full border transition-colors ${
-              tag === t ? 'bg-purple-600/30 border-purple-500 text-purple-200' : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-neutral-200'
-            }`}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
-
-      {/* Animation grid */}
-      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
-        {catalog.map((a) => (
-          <button
-            key={a.id}
-            onClick={() => pickAnim(a.id)}
-            className={`group relative rounded-lg overflow-hidden border transition-all ${
-              selectedAnimId === a.id ? 'border-purple-500 ring-2 ring-purple-500/40' : 'border-neutral-800 hover:border-neutral-600'
-            }`}
-          >
-            <div className="aspect-square bg-black">
-              <AnimPreviewCanvas animId={a.id} imgUrl={firstImgUrl} size={96} />
-            </div>
-            <div className="px-1 py-1 text-[10px] text-neutral-300 truncate text-center bg-neutral-900">{a.name}</div>
-            {selectedAnimId === a.id && (
-              <div className="absolute top-1 right-1 bg-purple-500 rounded-full p-0.5">
-                <Check size={10} className="text-white" />
-              </div>
-            )}
-          </button>
-        ))}
-      </div>
-
-      {/* Duration + apply controls */}
-      <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 space-y-3">
-        <div className="flex items-center gap-4 flex-wrap">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-neutral-400">Selected:</span>
-            <span className="text-sm text-white font-medium">{selectedAnimId ? animName(selectedAnimId) : 'None'}</span>
+        {/* Tag filters */}
+        {!showFavorites && (
+          <div className="flex gap-2 flex-wrap">
+            {tags.map((t) => (
+              <button key={t} onClick={() => setTag(t)} className={`px-3 py-1 text-xs rounded-full border transition-colors ${tag === t ? 'bg-purple-600/30 border-purple-500 text-purple-200' : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-neutral-200'}`}>{t}</button>
+            ))}
           </div>
-          {!isCombo && (
+        )}
+
+        {/* Animation grid */}
+        {catalog.length === 0 ? (
+          <div className="text-xs text-neutral-500 py-6 text-center">
+            {showFavorites ? 'No favorites yet — tap the ⭐ on any animation to add it here.' : 'No animations in this filter.'}
+          </div>
+        ) : (
+          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+            {catalog.map((a) => (
+              <div
+                key={a.id}
+                className={`group relative rounded-lg overflow-hidden border transition-all cursor-pointer ${selectedAnimId === a.id ? 'border-purple-500 ring-2 ring-purple-500/40' : 'border-neutral-800 hover:border-neutral-600'}`}
+                onClick={() => pickAnim(a.id)}
+              >
+                <div className="aspect-square bg-black">
+                  <AnimPreviewCanvas animId={a.id} imgUrl={firstImgUrl} size={96} />
+                </div>
+                <div className="px-1 py-1 text-[10px] text-neutral-300 truncate text-center bg-neutral-900">{a.name}</div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); store.toggleFavoriteAnimation(a.id); }}
+                  title="Favorite"
+                  className="absolute top-1 left-1 bg-black/60 rounded-full p-0.5 hover:bg-black/80"
+                >
+                  <Star size={11} className={favorites.has(a.id) ? 'fill-yellow-400 text-yellow-400' : 'text-neutral-300'} />
+                </button>
+                {selectedAnimId === a.id && (
+                  <div className="absolute top-1 right-1 bg-purple-500 rounded-full p-0.5"><Check size={10} className="text-white" /></div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Duration + apply controls */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 space-y-3">
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-neutral-400">Selected:</span>
+              <span className="text-sm text-white font-medium">{selectedAnimId ? animName(selectedAnimId) : 'None'}</span>
+            </div>
             <label className={`flex items-center gap-2 ${fullDuration ? 'opacity-50' : ''}`}>
               <span className="text-xs text-neutral-400">Duration</span>
               <input
@@ -928,91 +967,144 @@ function AnimationPanel() {
               />
               <span className="text-xs text-neutral-500">sec</span>
             </label>
-          )}
-          {!isCombo && (
             <label className="flex items-center gap-2 cursor-pointer">
               <input type="checkbox" checked={fullDuration} onChange={(e) => setFullDuration(e.target.checked)} className="w-4 h-4 accent-purple-500" />
               <span className="text-xs text-neutral-400">Full image duration</span>
             </label>
-          )}
-          {isCombo && (
-            <span className="text-xs text-neutral-500">Combo animations always play across the full image duration.</span>
-          )}
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <button
-            onClick={applyAll}
-            disabled={!currentAnim}
-            className="text-xs bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white rounded-lg px-4 py-2 font-medium transition-colors"
-          >
-            Apply to all images
-          </button>
-          <button
-            onClick={applySelected}
-            disabled={!currentAnim || selectedMedia.size === 0}
-            className="text-xs bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-800 disabled:text-neutral-600 text-white rounded-lg px-4 py-2 font-medium transition-colors border border-neutral-600"
-          >
-            Apply to {selectedMedia.size} selected
-          </button>
-          <button
-            onClick={() => setSelectedMedia(new Set(imageClips.map((c) => c.media.id)))}
-            className="text-xs text-neutral-400 hover:text-neutral-200"
-          >
-            Select all
-          </button>
-          <button onClick={() => setSelectedMedia(new Set())} className="text-xs text-neutral-400 hover:text-neutral-200">
-            Clear selection
-          </button>
-        </div>
-      </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={applyAll} disabled={!currentAnim} className="text-xs bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white rounded-lg px-4 py-2 font-medium transition-colors">Apply to all images</button>
+            <button onClick={applySelected} disabled={!currentAnim || selectedMedia.size === 0} className="text-xs bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-800 disabled:text-neutral-600 text-white rounded-lg px-4 py-2 font-medium transition-colors border border-neutral-600">Apply to {selectedMedia.size} selected</button>
+            <button onClick={addToSequence} disabled={!currentAnim} className="text-xs bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-800 disabled:text-neutral-600 text-white rounded-lg px-3 py-2 font-medium transition-colors border border-neutral-600">+ Add to sequence</button>
+            <span className="mx-1 h-4 w-px bg-neutral-700" />
+            <button onClick={() => setSelectedMedia(new Set(imageClips.map((c) => c.media.id)))} className="text-xs text-blue-400 hover:text-blue-300">Select all ({imageClips.length})</button>
+            <button onClick={() => setSelectedMedia(new Set())} className="text-xs text-neutral-400 hover:text-neutral-200">Clear selection</button>
+          </div>
 
-      {/* Per-image list */}
-      <div className="space-y-2">
-        <h3 className="text-sm font-medium text-neutral-300">Images ({imageClips.length})</h3>
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-          {imageClips.map((clip) => {
-            const cfg = project.clipAnimations?.[clip.media.id];
-            const over = isOverDuration(cfg, clip.duration);
-            const isSel = selectedMedia.has(clip.media.id);
-            const url = imageUrls.get(clip.media.id);
-            return (
-              <div
-                key={clip.media.id}
-                className={`rounded-lg overflow-hidden border transition-all ${
-                  over ? 'border-red-500 ring-2 ring-red-500/40' : isSel ? 'border-purple-500' : 'border-neutral-800'
-                }`}
-              >
-                <button onClick={() => toggleSelect(clip.media.id)} className="block w-full relative aspect-video bg-black">
-                  {url ? <img src={url} className="w-full h-full object-cover" alt="" /> : <div className="w-full h-full bg-neutral-800" />}
-                  <span className="absolute top-1 left-1 bg-black/70 text-white text-[10px] rounded px-1.5 py-0.5">#{clip.segmentIndex}</span>
-                  {isSel && <span className="absolute top-1 right-1 bg-purple-500 rounded-full p-0.5"><Check size={10} className="text-white" /></span>}
-                  <span className="absolute bottom-1 right-1 bg-black/70 text-neutral-300 text-[10px] rounded px-1 py-0.5">{clip.duration.toFixed(1)}s</span>
-                </button>
-                <div className="px-2 py-1.5 bg-neutral-900 space-y-1">
-                  <div className="flex flex-wrap gap-1">
-                    {cfg?.combo && <AnimTag label={`◆ ${animName(cfg.combo.animId)}`} />}
-                    {cfg?.in && <AnimTag label={`▸ ${animName(cfg.in.animId)}`} />}
-                    {cfg?.out && <AnimTag label={`◂ ${animName(cfg.out.animId)}`} />}
-                    {!hasAnimation(cfg) && <span className="text-[10px] text-neutral-600">No animation</span>}
-                  </div>
-                  {over && (
-                    <div className="flex items-center gap-1 text-[10px] text-red-400">
-                      <AlertTriangle size={10} /> Animation longer than image ({clip.duration.toFixed(1)}s) — adjust manually
-                    </div>
-                  )}
-                  {hasAnimation(cfg) && (
-                    <button
-                      onClick={() => store.clearClipAnimations(clip.media.id)}
-                      className="text-[10px] text-neutral-500 hover:text-red-400"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
+          {/* Sequence builder */}
+          {sequence.length > 0 && (
+            <div className="border-t border-neutral-800 pt-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-neutral-400">Sequence ({sequence.length}) — cycles across images in order</span>
+                <button onClick={() => setSequence([])} className="text-xs text-red-400 hover:text-red-300">Clear sequence</button>
               </div>
-            );
-          })}
+              <div className="flex gap-2 flex-wrap">
+                {sequence.map((it, i) => (
+                  <span key={i} className="flex items-center gap-1 text-[11px] bg-purple-600/20 text-purple-200 rounded px-2 py-1">
+                    {i + 1}. {animName(it.anim.animId)}
+                    <button onClick={() => setSequence((s) => s.filter((_, j) => j !== i))} className="text-purple-300 hover:text-white"><X size={10} /></button>
+                  </span>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => applySequence(false)} className="text-xs bg-purple-600 hover:bg-purple-500 text-white rounded-lg px-3 py-1.5 font-medium">Apply sequence to all</button>
+                <button onClick={() => applySequence(true)} disabled={selectedMedia.size === 0} className="text-xs bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-800 disabled:text-neutral-600 text-white rounded-lg px-3 py-1.5 font-medium border border-neutral-600">Apply to {selectedMedia.size} selected</button>
+              </div>
+            </div>
+          )}
         </div>
+
+        {/* Per-image list */}
+        <ImageClipGrid imageClips={imageClips} imageUrls={imageUrls} project={project} selectedMedia={selectedMedia} toggleSelect={toggleSelect} onClear={(id) => store.clearClipAnimations(id)} showAnim />
+      </>) : (<>
+        {/* Transitions */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-medium text-neutral-200 flex items-center gap-2"><Shuffle size={16} className="text-purple-400" /> Transitions</h3>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-neutral-500">{transCount}/{Math.max(0, imageClips.length - 1)} joins</span>
+              {transCount > 0 && <button onClick={() => store.clearAllTransitions()} className="text-xs text-red-400 hover:text-red-300">Clear all</button>}
+            </div>
+          </div>
+          <p className="text-xs text-neutral-500 mt-1">A transition blends into an image from the one before it. The first image has no transition.</p>
+        </div>
+
+        <div className="flex gap-2 flex-wrap">
+          {transitionTags().map((t) => (
+            <button key={t} onClick={() => setTransTag(t)} className={`px-3 py-1 text-xs rounded-full border transition-colors ${transTag === t ? 'bg-purple-600/30 border-purple-500 text-purple-200' : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-neutral-200'}`}>{t}</button>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+          {transCatalog.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => { setTransId(t.id); setTransDuration(transitionDefaultDuration(t.id)); }}
+              className={`relative rounded-lg border p-3 h-20 flex items-center justify-center text-center transition-all ${transId === t.id ? 'border-purple-500 ring-2 ring-purple-500/40 bg-purple-600/10' : 'border-neutral-800 hover:border-neutral-600 bg-neutral-900'}`}
+            >
+              <span className="text-xs text-neutral-200">{t.name}</span>
+              {transId === t.id && <div className="absolute top-1 right-1 bg-purple-500 rounded-full p-0.5"><Check size={10} className="text-white" /></div>}
+            </button>
+          ))}
+        </div>
+
+        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 space-y-3">
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-2"><span className="text-xs text-neutral-400">Selected:</span><span className="text-sm text-white font-medium">{transitionName(transId)}</span></div>
+            <label className="flex items-center gap-2"><span className="text-xs text-neutral-400">Duration</span>
+              <input type="number" step="0.1" min="0.1" value={transDuration} onChange={(e) => setTransDuration(Math.max(0.1, parseFloat(e.target.value) || 0.1))} className="w-20 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-purple-500" />
+              <span className="text-xs text-neutral-500">sec</span>
+            </label>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={applyTransAll} disabled={!currentTrans} className="text-xs bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white rounded-lg px-4 py-2 font-medium transition-colors">Apply to all joins</button>
+            <button onClick={applyTransSelected} disabled={!currentTrans || selectedMedia.size === 0} className="text-xs bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-800 disabled:text-neutral-600 text-white rounded-lg px-4 py-2 font-medium transition-colors border border-neutral-600">Apply to {selectedMedia.size} selected</button>
+            <button onClick={() => setSelectedMedia(new Set(imageClips.slice(1).map((c) => c.media.id)))} className="text-xs text-blue-400 hover:text-blue-300">Select all</button>
+            <button onClick={() => setSelectedMedia(new Set())} className="text-xs text-neutral-400 hover:text-neutral-200">Clear</button>
+          </div>
+        </div>
+
+        <ImageClipGrid imageClips={imageClips} imageUrls={imageUrls} project={project} selectedMedia={selectedMedia} toggleSelect={toggleSelect} onClear={(id) => store.setTransition(id, null)} showTrans />
+      </>)}
+    </div>
+  );
+}
+
+// Grid of image clips with their assigned animation/transition badges.
+function ImageClipGrid({ imageClips, imageUrls, project, selectedMedia, toggleSelect, onClear, showAnim, showTrans }: {
+  imageClips: Clip[]; imageUrls: Map<string, string>; project: any; selectedMedia: Set<string>;
+  toggleSelect: (id: string) => void; onClear: (id: string) => void; showAnim?: boolean; showTrans?: boolean;
+}) {
+  return (
+    <div className="space-y-2">
+      <h3 className="text-sm font-medium text-neutral-300">Images ({imageClips.length})</h3>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+        {imageClips.map((clip) => {
+          const cfg = project.clipAnimations?.[clip.media.id];
+          const trans = project.transitions?.[clip.media.id];
+          const over = showAnim && isOverDuration(cfg, clip.duration);
+          const isSel = selectedMedia.has(clip.media.id);
+          const url = imageUrls.get(clip.media.id);
+          const hasTrans = trans && trans.transId && trans.transId !== TRANS_NONE_ID;
+          return (
+            <div key={clip.media.id} className={`rounded-lg overflow-hidden border transition-all ${over ? 'border-red-500 ring-2 ring-red-500/40' : isSel ? 'border-purple-500' : 'border-neutral-800'}`}>
+              <button onClick={() => toggleSelect(clip.media.id)} className="block w-full relative aspect-video bg-black">
+                {url ? <img src={url} className="w-full h-full object-cover" alt="" /> : <div className="w-full h-full bg-neutral-800" />}
+                <span className="absolute top-1 left-1 bg-black/70 text-white text-[10px] rounded px-1.5 py-0.5">#{clip.segmentIndex}</span>
+                {isSel && <span className="absolute top-1 right-1 bg-purple-500 rounded-full p-0.5"><Check size={10} className="text-white" /></span>}
+                <span className="absolute bottom-1 right-1 bg-black/70 text-neutral-300 text-[10px] rounded px-1 py-0.5">{clip.duration.toFixed(1)}s</span>
+              </button>
+              <div className="px-2 py-1.5 bg-neutral-900 space-y-1">
+                <div className="flex flex-wrap gap-1">
+                  {showAnim && cfg?.combo && <AnimTag label={`◆ ${animName(cfg.combo.animId)}`} />}
+                  {showAnim && cfg?.in && <AnimTag label={`▸ ${animName(cfg.in.animId)}`} />}
+                  {showAnim && cfg?.out && <AnimTag label={`◂ ${animName(cfg.out.animId)}`} />}
+                  {showAnim && !hasAnimation(cfg) && <span className="text-[10px] text-neutral-600">No animation</span>}
+                  {showTrans && hasTrans && <AnimTag label={`⇥ ${transitionName(trans.transId)}`} />}
+                  {showTrans && !hasTrans && <span className="text-[10px] text-neutral-600">No transition</span>}
+                </div>
+                {over && (
+                  <div className="flex items-center gap-1 text-[10px] text-red-400">
+                    <AlertTriangle size={10} /> Animation longer than image ({clip.duration.toFixed(1)}s) — adjust manually
+                  </div>
+                )}
+                {((showAnim && hasAnimation(cfg)) || (showTrans && hasTrans)) && (
+                  <button onClick={() => onClear(clip.media.id)} className="text-[10px] text-neutral-500 hover:text-red-400">Remove</button>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -1042,10 +1134,20 @@ function PreviewPanel({ clips, audioDuration }: { clips: Clip[]; audioDuration: 
   const timeRef = useRef<number>(0);
   const clipRef = useRef<Clip | null>(null);
   const imgReadyRef = useRef<boolean>(false);
-  // Kept current every render so the always-on draw loop sees live animation edits.
+  // Kept current every render so the always-on draw loop sees live edits.
   const animCfgRef = useRef(project?.clipAnimations);
   animCfgRef.current = project?.clipAnimations;
-  const CANVAS_W = 1280, CANVAS_H = 720;
+  const transRef = useRef(project?.transitions);
+  transRef.current = project?.transitions;
+  // Decoded image bitmaps for the shared renderer (enables transitions/fit).
+  const bitmapCache = useRef<Map<string, DrawSource>>(new Map());
+  const clipsRef = useRef<Clip[]>(clips);
+  clipsRef.current = clips;
+  const ratio = project?.videoExport?.aspectRatio || '16:9';
+  const fit = project?.videoExport?.imageFit || 'cover';
+  const fitRef = useRef(fit); fitRef.current = fit;
+  const pdims = frameDims('720p', ratio);
+  const CANVAS_W = pdims.w, CANVAS_H = pdims.h;
 
   // Multi-part audio state
   const [partUrls, setPartUrls] = useState<string[]>([]);
@@ -1195,27 +1297,53 @@ function PreviewPanel({ clips, audioDuration }: { clips: Clip[]; audioDuration: 
     }
   }, [getMediaUrl, offsets, currentPart, playing]);
 
-  // Always-on canvas draw loop: composites the current clip with its animation.
+  // Decode image bitmaps once so the shared renderer can composite transitions.
+  useEffect(() => {
+    let cancelled = false;
+    const cache = bitmapCache.current;
+    (async () => {
+      const seen = new Set<string>();
+      for (const clip of clips) {
+        if (!clip.isImage || seen.has(clip.media.id) || cache.has(clip.media.id)) continue;
+        seen.add(clip.media.id);
+        const blob = await resolveMediaBlob(project, clip.media);
+        if (blob && !cancelled) {
+          try { cache.set(clip.media.id, await createImageBitmap(blob)); } catch { /* skip */ }
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      cache.forEach((b) => { if ((b as any).close) (b as any).close(); });
+      cache.clear();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id, clips.length]);
+
+  // Always-on canvas draw loop: composites current clip + animation + transition.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return;
     let raf = 0;
     const draw = () => {
-      const clip = clipRef.current;
       const t = timeRef.current;
-      if (clip) {
-        const src = clip.isImage
-          ? (imgReadyRef.current ? imgRef.current : null)
-          : videoRef.current;
-        const cfg = animCfgRef.current?.[clip.media.id];
-        const transform = computeTransform(cfg, t - clip.start, clip.duration);
-        drawFrame(ctx as any, src as any, transform, CANVAS_W, CANVAS_H);
-      } else {
-        ctx.fillStyle = '#000';
-        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-      }
+      const clip = clipRef.current;
+      // Current video clip streams from the <video>; images come from the cache.
+      const getSource = (mediaId: string): DrawSource | null => {
+        if (clip && !clip.isImage && clip.media.id === mediaId) return videoRef.current;
+        return bitmapCache.current.get(mediaId) || (clip?.isImage && imgReadyRef.current && clip.media.id === mediaId ? imgRef.current : null);
+      };
+      renderTimelineFrame(ctx as any, t, {
+        clips: clipsRef.current,
+        animCfgs: animCfgRef.current || {},
+        transitions: transRef.current || {},
+        getSource,
+        W: canvas.width,
+        H: canvas.height,
+        fit: fitRef.current,
+      });
       raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
@@ -1283,7 +1411,7 @@ function PreviewPanel({ clips, audioDuration }: { clips: Clip[]; audioDuration: 
 
   return (
     <div className="p-4 space-y-4">
-      <div className="bg-black rounded-xl overflow-hidden relative" style={{ aspectRatio: '16/9' }}>
+      <div className="bg-black rounded-xl overflow-hidden relative mx-auto" style={{ aspectRatio: `${CANVAS_W}/${CANVAS_H}`, maxHeight: '70vh', maxWidth: '100%' }}>
         <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} className="w-full h-full object-contain" />
         <video ref={videoRef} className="hidden" muted playsInline preload="auto" />
         <video ref={nextVideoRef} className="hidden" muted playsInline preload="auto" />
@@ -1353,6 +1481,8 @@ function VideoExportSection() {
   const { currentProject: project } = store;
   const [resolution, setResolution] = useState<ResolutionPreset>('1080p');
   const [fps, setFps] = useState<30 | 60>(30);
+  const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
+  const [imageFit, setImageFit] = useState<ImageFit>('cover');
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressMsg, setProgressMsg] = useState('');
@@ -1362,6 +1492,8 @@ function VideoExportSection() {
     if (project?.videoExport) {
       setResolution(project.videoExport.resolution);
       setFps(project.videoExport.fps);
+      if (project.videoExport.aspectRatio) setAspectRatio(project.videoExport.aspectRatio);
+      if (project.videoExport.imageFit) setImageFit(project.videoExport.imageFit);
     }
   }, [project?.id]);
 
@@ -1369,7 +1501,7 @@ function VideoExportSection() {
   const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'Untitled';
 
   const handleExport = async () => {
-    const settings: VideoExportSettings = { resolution, fps };
+    const settings: VideoExportSettings = { resolution, fps, aspectRatio, imageFit };
     store.updateProject({ videoExport: settings });
     setExporting(true);
     setProgress(0);
@@ -1393,6 +1525,7 @@ function VideoExportSection() {
   };
 
   const res = RESOLUTIONS[resolution];
+  const dims = frameDims(resolution, aspectRatio);
 
   return (
     <div className="bg-neutral-900 border border-purple-800/50 rounded-xl p-5 space-y-3">
@@ -1400,7 +1533,7 @@ function VideoExportSection() {
         <Film size={16} className="text-purple-400" /> Export Video (MP4) — no CapCut needed
       </h3>
       <p className="text-xs text-neutral-500">
-        Renders your images, audio and animations straight to an MP4 file on your PC.
+        Renders your images, audio, animations and transitions straight to an MP4 file on your PC.
       </p>
       <div className="flex items-center gap-4 flex-wrap">
         <div>
@@ -1411,8 +1544,32 @@ function VideoExportSection() {
             className="bg-neutral-800 border border-neutral-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
           >
             {(Object.keys(RESOLUTIONS) as ResolutionPreset[]).map((r) => (
-              <option key={r} value={r}>{RESOLUTIONS[r].label} — {RESOLUTIONS[r].w}×{RESOLUTIONS[r].h}</option>
+              <option key={r} value={r}>{RESOLUTIONS[r].label}</option>
             ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-neutral-400 mb-1">Aspect ratio</label>
+          <select
+            value={aspectRatio}
+            onChange={(e) => setAspectRatio(e.target.value as AspectRatio)}
+            className="bg-neutral-800 border border-neutral-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
+          >
+            {(['16:9', '9:16', '1:1', '4:3'] as AspectRatio[]).map((r) => (
+              <option key={r} value={r}>{r}{r === '16:9' ? ' (landscape)' : r === '9:16' ? ' (vertical)' : r === '1:1' ? ' (square)' : ''}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-neutral-400 mb-1">Image fit</label>
+          <select
+            value={imageFit}
+            onChange={(e) => setImageFit(e.target.value as ImageFit)}
+            className="bg-neutral-800 border border-neutral-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
+          >
+            <option value="cover">Cover (fill, may crop)</option>
+            <option value="contain">Contain (fit, may letterbox)</option>
+            <option value="fill">Stretch to fill</option>
           </select>
         </div>
         <div>
@@ -1432,6 +1589,7 @@ function VideoExportSection() {
           </div>
         </div>
       </div>
+      <p className="text-xs text-neutral-500">Output: <span className="text-neutral-300 font-mono">{dims.w}×{dims.h}</span> @ {fps}fps</p>
 
       {exporting ? (
         <div className="space-y-2">
