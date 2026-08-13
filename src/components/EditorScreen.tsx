@@ -1602,6 +1602,18 @@ function VideoExportSection() {
       </div>
       <p className="text-xs text-neutral-500">Output: <span className="text-neutral-300 font-mono">{dims.w}×{dims.h}</span> @ {fps}fps</p>
 
+      {/* Save folder */}
+      {store.nativeExport ? (
+        <div className="flex items-center gap-2 flex-wrap bg-neutral-800/40 border border-neutral-700 rounded-lg px-3 py-2">
+          <FolderOpen size={14} className="text-neutral-400 shrink-0" />
+          <span className="text-xs text-neutral-400">Save to:</span>
+          <code className="text-xs text-blue-300 font-mono truncate max-w-[60%]">{store.videoExportFolder || '(default: Videos folder)'}</code>
+          <button onClick={() => store.pickVideoExportFolder()} className="text-xs bg-neutral-700 hover:bg-neutral-600 text-white rounded px-2 py-1 ml-auto">Change…</button>
+        </div>
+      ) : (
+        <p className="text-xs text-neutral-500">Saves to your browser's Downloads folder. (Use the desktop app to choose a folder.)</p>
+      )}
+
       <button
         onClick={handleExport}
         disabled={!project.processed || project.clips.length === 0 || exporting}
@@ -1618,7 +1630,7 @@ function VideoExportSection() {
 
 // Global export overlay — visible on every tab while a render is running.
 function ExportOverlay() {
-  const { videoExportState: st, cancelVideoExport } = useStore();
+  const { videoExportState: st, cancelVideoExport, revealLastExport, nativeExport } = useStore();
   if (!st) return null;
   const pct = Math.round(st.progress * 100);
   return (
@@ -1630,8 +1642,9 @@ function ExportOverlay() {
             <span>Export failed: {st.error}</span>
           </div>
         ) : st.done ? (
-          <div className="flex items-center gap-2 text-sm text-green-300">
-            <CheckCircle2 size={16} /> {st.message} — check your Downloads.
+          <div className="flex items-center justify-between gap-2 text-sm text-green-300">
+            <span className="flex items-center gap-2 min-w-0"><CheckCircle2 size={16} className="shrink-0" /> <span className="truncate">{st.message}</span></span>
+            {nativeExport && <button onClick={revealLastExport} className="text-xs bg-neutral-700 hover:bg-neutral-600 text-white rounded px-2 py-1 shrink-0">Open folder</button>}
           </div>
         ) : (
           <>

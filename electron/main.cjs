@@ -1,4 +1,4 @@
-const { app, BrowserWindow, session, shell, Menu, protocol, net, ipcMain } = require('electron');
+const { app, BrowserWindow, session, shell, Menu, protocol, net, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -21,6 +21,31 @@ function nativeBinPath() {
 function nativeModelPath() {
   return path.join(nativeDir(), 'ggml-tiny.en.bin');
 }
+
+// ─── Video export folder ─────────────────────────────────────────
+// The renderer triggers a normal browser download for the finished MP4; we
+// intercept it here and save it into the user's chosen folder (remembered
+// across projects), then reveal it in the file manager so it's never "lost".
+let exportDir = null;
+
+function defaultExportDir() {
+  try { return app.getPath('videos'); } catch { /* fall through */ }
+  try { return app.getPath('downloads'); } catch { return app.getPath('home'); }
+}
+
+ipcMain.handle('get-export-dir', () => exportDir || defaultExportDir());
+ipcMain.handle('set-export-dir', (_e, dir) => { if (typeof dir === 'string' && dir) exportDir = dir; return exportDir; });
+ipcMain.handle('pick-export-dir', async () => {
+  const res = await dialog.showOpenDialog({
+    title: 'Choose where to save exported videos',
+    defaultPath: exportDir || defaultExportDir(),
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (res.canceled || res.filePaths.length === 0) return null;
+  exportDir = res.filePaths[0];
+  return exportDir;
+});
+ipcMain.handle('reveal-path', (_e, p) => { if (p) shell.showItemInFolder(p); });
 
 ipcMain.handle('native-available', () => {
   try {
@@ -160,6 +185,23 @@ app.whenReady().then(() => {
     callback(true);
   });
   session.defaultSession.setPermissionCheckHandler(() => true);
+
+  // Save exported videos into the chosen folder and reveal them afterwards.
+  session.defaultSession.on('will-download', (_event, item) => {
+    const dir = exportDir || defaultExportDir();
+    try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
+    const savePath = path.join(dir, item.getFilename());
+    item.setSavePath(savePath);
+    item.once('done', (_e, state) => {
+      const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+      if (state === 'completed') {
+        if (wc) wc.send('export-saved', savePath);
+        shell.showItemInFolder(savePath);
+      } else if (wc) {
+        wc.send('export-save-failed', String(state));
+      }
+    });
+  });
 
   createWindow();
 

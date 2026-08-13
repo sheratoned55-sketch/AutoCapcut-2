@@ -3,7 +3,7 @@
   "productName": "AutoCapcut",
   "description": "CapCut Auto-Editor desktop app",
   "private": true,
-  "version": "1.7.0",
+  "version": "1.7.1",
   "type": "module",
   "main": "electron/main.cjs",
   "author": "sheratoned55-sketch",
