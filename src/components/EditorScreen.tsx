@@ -11,7 +11,7 @@ import { parseScriptFull, detectScriptMode, parseSegments, verifySegmentFill, se
 import { ValidationReport } from '../lib/export';
 import { buildPartOffsets } from '../lib/audio';
 import { catalogFor, allTags, allAnims, animCategory, animName, computeTransform, isOverDuration, hasAnimation, getAnim, NONE_ID } from '../lib/animations';
-import { drawFrame, renderTimelineFrame, RESOLUTIONS, frameDims, type DrawSource, type TimelineRenderCtx } from '../lib/render';
+import { drawFrame, renderTimelineFrame, RESOLUTIONS, frameDims, estimateExportBytes, formatBytes, type DrawSource, type TimelineRenderCtx } from '../lib/render';
 import { transitionCatalog, transitionTags, transitionName, transitionDefaultDuration, TRANS_NONE_ID } from '../lib/transitions';
 
 function fmtTime(s: number): string {
@@ -1600,7 +1600,21 @@ function VideoExportSection() {
           </div>
         </div>
       </div>
-      <p className="text-xs text-neutral-500">Output: <span className="text-neutral-300 font-mono">{dims.w}×{dims.h}</span> @ {fps}fps</p>
+      {(() => {
+        const estBytes = estimateExportBytes(resolution, project.audioDuration || 0);
+        const big = estBytes > 2 * 1_073_741_824;
+        return (
+          <div className="text-xs text-neutral-500">
+            Output: <span className="text-neutral-300 font-mono">{dims.w}×{dims.h}</span> @ {fps}fps ·
+            estimated size <span className={`font-mono ${big ? 'text-amber-400' : 'text-neutral-300'}`}>≈ {formatBytes(estBytes)}</span>
+            {big && (
+              <span className="block text-amber-400 mt-0.5">
+                ⚠ Large file — make sure your drive has this much free space, or choose <strong>720p / 480p</strong> for a much smaller file.
+              </span>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Save folder */}
       {store.nativeExport ? (

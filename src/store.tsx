@@ -71,7 +71,7 @@ interface StoreContextValue {
   lastExportPath: string | null;
   pickVideoExportFolder: () => Promise<void>;
   revealLastExport: () => void;
-  exportVideo: (settings: VideoExportSettings, onProgress: (f: number, m: string) => void, signal: CancelSignal) => Promise<Blob>;
+  exportVideo: (settings: VideoExportSettings, onProgress: (f: number, m: string) => void, signal: CancelSignal, nativeSink?: { write: (chunk: Uint8Array, position: number) => Promise<unknown> }) => Promise<Blob | null>;
   importTemplate: () => Promise<CapCutTemplate | null>;
   templates: CapCutTemplate[];
   loadTemplates: () => Promise<void>;
@@ -1112,7 +1112,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     settings: VideoExportSettings,
     onProgress: (f: number, m: string) => void,
     signal: CancelSignal,
-  ): Promise<Blob> => {
+    nativeSink?: { write: (chunk: Uint8Array, position: number) => Promise<unknown> },
+  ): Promise<Blob | null> => {
     if (!currentProject) throw new Error('No project open');
     const project = currentProject;
     if (!project.processed || project.clips.length === 0) {
@@ -1177,8 +1178,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         settings,
         onProgress,
         signal,
+        nativeSink,
       });
-      addLog(`Video export complete: ${settings.resolution} @ ${settings.fps}fps, ${(blob.size / 1_048_576).toFixed(1)} MB`);
+      addLog(`Video export complete: ${settings.resolution} @ ${settings.fps}fps${blob ? `, ${(blob.size / 1_048_576).toFixed(1)} MB` : ' (streamed to disk)'}`);
       return blob;
     } finally {
       tempUrls.forEach((u) => URL.revokeObjectURL(u));
@@ -1197,33 +1199,67 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (videoExportState?.active) return; // already exporting
     await updateProject({ videoExport: settings });
     const safeName = currentProject.name.replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'video';
+    const filename = `${safeName}_${settings.resolution}_${settings.fps}fps.mp4`;
     exportCancelRef.current = { cancelled: false };
+
+    // Prefer streaming straight to disk (desktop app) — no giant Blob in RAM,
+    // and a disk-full error surfaces cleanly. Falls back to a download.
+    const canStream = !!(nativeBridge && nativeBridge.exportStreamOpen);
+    let sink: { write: (chunk: Uint8Array, position: number) => Promise<unknown> } | undefined;
+    let savePath: string | null = null;
+    if (canStream) {
+      try {
+        savePath = await nativeBridge.exportStreamOpen(filename);
+        sink = { write: (chunk: Uint8Array, position: number) => nativeBridge.exportStreamWrite(chunk, position) };
+      } catch (e: any) {
+        addLog(`Could not open the export file: ${e.message}`, 'warn');
+        sink = undefined;
+      }
+    }
+
     setVideoExportState({ active: true, progress: 0, message: 'Starting…' });
+    const diskFullMsg = (m: string) => /enospc|no space|disk( is)? full/i.test(m || '')
+      ? 'Your disk is full — free space or pick another drive (Save to → Change…), then export again.'
+      : m;
     try {
       const blob = await exportVideo(
         settings,
         (f, m) => setVideoExportState({ active: true, progress: f, message: m }),
         exportCancelRef.current,
+        sink,
       );
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${safeName}_${settings.resolution}_${settings.fps}fps.mp4`;
-      a.click();
-      URL.revokeObjectURL(url);
-      const where = nativeExport ? (videoExportFolder ? `Saved to ${videoExportFolder}` : 'Saved to your export folder') : 'Saved to your Downloads folder';
-      setVideoExportState({ active: false, progress: 1, message: where, done: true });
-      setTimeout(() => setVideoExportState((s) => (s && s.done ? null : s)), 8000);
+
+      if (sink) {
+        savePath = (await nativeBridge.exportStreamClose()) || savePath;
+        if (savePath) setLastExportPath(savePath);
+        setVideoExportState({ active: false, progress: 1, message: `Saved to ${savePath || 'your export folder'}`, done: true });
+        setTimeout(() => setVideoExportState((s) => (s && s.done ? null : s)), 10000);
+      } else if (blob) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        if (nativeExport) {
+          setVideoExportState({ active: true, progress: 1, message: 'Saving to disk…' });
+          setTimeout(() => URL.revokeObjectURL(url), 120000);
+        } else {
+          URL.revokeObjectURL(url);
+          setVideoExportState({ active: false, progress: 1, message: 'Saved to your Downloads folder', done: true });
+          setTimeout(() => setVideoExportState((s) => (s && s.done ? null : s)), 8000);
+        }
+      }
     } catch (e: any) {
+      if (sink) { try { await nativeBridge.exportStreamAbort(); } catch { /* ignore */ } }
       if (e.message === 'Export cancelled') {
         setVideoExportState(null);
       } else {
         addLog(`Video export failed: ${e.message}`, 'error');
-        setVideoExportState({ active: false, progress: 0, message: '', error: e.message });
-        setTimeout(() => setVideoExportState((s) => (s && s.error ? null : s)), 8000);
+        setVideoExportState({ active: false, progress: 0, message: '', error: diskFullMsg(e.message) });
+        setTimeout(() => setVideoExportState((s) => (s && s.error ? null : s)), 12000);
       }
     }
-  }, [currentProject, videoExportState, updateProject, exportVideo, addLog, nativeExport, videoExportFolder]);
+  }, [currentProject, videoExportState, updateProject, exportVideo, addLog, nativeBridge, nativeExport]);
 
   const pickVideoExportFolder = useCallback(async () => {
     if (!nativeBridge?.pickExportDir) return;
@@ -1242,10 +1278,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (nativeBridge?.revealPath && lastExportPath) nativeBridge.revealPath(lastExportPath);
   }, [nativeBridge, lastExportPath]);
 
-  // Desktop app: learn where exported videos are saved, and hear when one lands.
+  // Desktop app: learn where exported videos are saved, and hear when one lands
+  // (or fails — e.g. the disk is full), so the overlay reports the real result.
   useEffect(() => {
     if (!nativeBridge) return;
-    nativeBridge.onExportSaved?.((p: string) => setLastExportPath(p));
+    nativeBridge.onExportSaved?.((p: string) => {
+      setLastExportPath(p);
+      setVideoExportState({ active: false, progress: 1, message: `Saved to ${p}`, done: true });
+      setTimeout(() => setVideoExportState((s) => (s && s.done ? null : s)), 10000);
+    });
+    nativeBridge.onExportSaveFailed?.((reason: string) => {
+      setVideoExportState({ active: false, progress: 0, message: '', error: `Could not save the video (${reason}). Your disk may be full — free space or pick another folder/drive, then export again.` });
+    });
   }, [nativeBridge]);
   useEffect(() => {
     if (!nativeBridge?.getExportDir) return;

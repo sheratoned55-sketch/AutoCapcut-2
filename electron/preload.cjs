@@ -15,4 +15,10 @@ contextBridge.exposeInMainWorld('autocapcut', {
   pickExportDir: () => ipcRenderer.invoke('pick-export-dir'),
   revealPath: (p) => ipcRenderer.invoke('reveal-path', p),
   onExportSaved: (cb) => ipcRenderer.on('export-saved', (_e, p) => cb(p)),
+  onExportSaveFailed: (cb) => ipcRenderer.on('export-save-failed', (_e, reason) => cb(reason)),
+  // Streaming export: write the MP4 to disk chunk-by-chunk (memory-safe).
+  exportStreamOpen: (filename) => ipcRenderer.invoke('export-stream-open', { filename }),
+  exportStreamWrite: (chunk, position) => ipcRenderer.invoke('export-stream-write', { chunk, position }),
+  exportStreamClose: () => ipcRenderer.invoke('export-stream-close'),
+  exportStreamAbort: () => ipcRenderer.invoke('export-stream-abort'),
 });
