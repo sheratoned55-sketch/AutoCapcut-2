@@ -82,6 +82,47 @@ export interface PipelineStep {
   message?: string;
 }
 
+// ─── Animations (standalone, built-in — no CapCut needed) ────────
+
+export type AnimCategory = 'in' | 'out' | 'combo';
+
+/** A built-in animation definition (the catalog entry). */
+export interface AnimationDef {
+  /** stable id, e.g. 'zoom-in' */
+  id: string;
+  /** human label, e.g. 'Zoom In' */
+  name: string;
+  category: AnimCategory;
+  /** filter tags: 'Trending' | 'Basic' | 'Light' | 'Glitch' | 'Mask' | 'Camera' … */
+  tags: string[];
+  /** default animation length in seconds */
+  defaultDuration: number;
+}
+
+/** A single animation assignment (one slot: in, out, or combo). */
+export interface ClipAnim {
+  /** references an AnimationDef.id */
+  animId: string;
+  /** how long the animation runs, in seconds */
+  duration: number;
+  /** when true the animation spans the clip's full duration (duration ignored) */
+  fullDuration: boolean;
+}
+
+/** Per-clip animation config. `combo` (if set) replaces in+out. */
+export interface ClipAnimationConfig {
+  in?: ClipAnim;
+  out?: ClipAnim;
+  combo?: ClipAnim;
+}
+
+export type ResolutionPreset = '480p' | '720p' | '1080p' | '2k';
+
+export interface VideoExportSettings {
+  resolution: ResolutionPreset;
+  fps: 30 | 60;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -99,6 +140,10 @@ export interface Project {
   /** CapCut export settings */
   capcutUsername?: string;
   capcutDraftsPath?: string;
+  /** Per-clip animation assignments, keyed by media id (stable across retime). */
+  clipAnimations?: Record<string, ClipAnimationConfig>;
+  /** Standalone MP4 export settings. */
+  videoExport?: VideoExportSettings;
 }
 
 export interface ProjectMeta {
