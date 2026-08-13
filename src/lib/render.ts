@@ -25,6 +25,19 @@ const ASPECT: Record<AspectRatio, [number, number]> = {
   '16:9': [16, 9], '9:16': [9, 16], '1:1': [1, 1], '4:3': [4, 3],
 };
 
+/** Rough exported file size in bytes for a resolution over `durationSec`. */
+export function estimateExportBytes(resolution: ResolutionPreset, durationSec: number): number {
+  const videoBits = RESOLUTIONS[resolution].bitrate;
+  const audioBits = 128_000;
+  return Math.round(((videoBits + audioBits) * Math.max(0, durationSec)) / 8);
+}
+
+export function formatBytes(n: number): string {
+  if (n >= 1_073_741_824) return (n / 1_073_741_824).toFixed(2) + ' GB';
+  if (n >= 1_048_576) return (n / 1_048_576).toFixed(0) + ' MB';
+  return (n / 1024).toFixed(0) + ' KB';
+}
+
 /** Frame pixel dimensions for a resolution + aspect ratio (both even). */
 export function frameDims(resolution: ResolutionPreset, aspect: AspectRatio): { w: number; h: number } {
   const base = RESOLUTIONS[resolution].h;

@@ -1210,10 +1210,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       a.href = url;
       a.download = `${safeName}_${settings.resolution}_${settings.fps}fps.mp4`;
       a.click();
-      URL.revokeObjectURL(url);
-      const where = nativeExport ? (videoExportFolder ? `Saved to ${videoExportFolder}` : 'Saved to your export folder') : 'Saved to your Downloads folder';
-      setVideoExportState({ active: false, progress: 1, message: where, done: true });
-      setTimeout(() => setVideoExportState((s) => (s && s.done ? null : s)), 8000);
+      if (nativeExport) {
+        // The desktop app writes the file asynchronously; keep the blob URL
+        // alive and let onExportSaved / onExportSaveFailed report the outcome.
+        setVideoExportState({ active: true, progress: 1, message: 'Saving to disk…' });
+        setTimeout(() => URL.revokeObjectURL(url), 120000);
+      } else {
+        URL.revokeObjectURL(url);
+        setVideoExportState({ active: false, progress: 1, message: 'Saved to your Downloads folder', done: true });
+        setTimeout(() => setVideoExportState((s) => (s && s.done ? null : s)), 8000);
+      }
     } catch (e: any) {
       if (e.message === 'Export cancelled') {
         setVideoExportState(null);
@@ -1242,10 +1248,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (nativeBridge?.revealPath && lastExportPath) nativeBridge.revealPath(lastExportPath);
   }, [nativeBridge, lastExportPath]);
 
-  // Desktop app: learn where exported videos are saved, and hear when one lands.
+  // Desktop app: learn where exported videos are saved, and hear when one lands
+  // (or fails — e.g. the disk is full), so the overlay reports the real result.
   useEffect(() => {
     if (!nativeBridge) return;
-    nativeBridge.onExportSaved?.((p: string) => setLastExportPath(p));
+    nativeBridge.onExportSaved?.((p: string) => {
+      setLastExportPath(p);
+      setVideoExportState({ active: false, progress: 1, message: `Saved to ${p}`, done: true });
+      setTimeout(() => setVideoExportState((s) => (s && s.done ? null : s)), 10000);
+    });
+    nativeBridge.onExportSaveFailed?.((reason: string) => {
+      setVideoExportState({ active: false, progress: 0, message: '', error: `Could not save the video (${reason}). Your disk may be full — free space or pick another folder/drive, then export again.` });
+    });
   }, [nativeBridge]);
   useEffect(() => {
     if (!nativeBridge?.getExportDir) return;

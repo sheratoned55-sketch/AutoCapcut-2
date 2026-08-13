@@ -15,4 +15,5 @@ contextBridge.exposeInMainWorld('autocapcut', {
   pickExportDir: () => ipcRenderer.invoke('pick-export-dir'),
   revealPath: (p) => ipcRenderer.invoke('reveal-path', p),
   onExportSaved: (cb) => ipcRenderer.on('export-saved', (_e, p) => cb(p)),
+  onExportSaveFailed: (cb) => ipcRenderer.on('export-save-failed', (_e, reason) => cb(reason)),
 });
