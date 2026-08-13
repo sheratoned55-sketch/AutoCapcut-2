@@ -219,9 +219,10 @@ export function computeTransform(
   if (cfg.combo && cfg.combo.animId !== NONE_ID) {
     const e = BY_ID.get(cfg.combo.animId);
     if (e) {
-      // Combo runs across its duration window (or the whole clip when
-      // fullDuration), then holds the final pose for the rest of the clip.
-      const window = cfg.combo.fullDuration ? clipDur : Math.min(cfg.combo.duration || clipDur, clipDur);
+      // Combo runs across its (speed-adjusted) window, then holds the final
+      // pose for the rest of the clip. Faster speed → shorter window.
+      const base = cfg.combo.fullDuration ? clipDur : Math.min(cfg.combo.duration || clipDur, clipDur);
+      const window = Math.min(clipDur, base / spd(cfg.combo));
       const p = window > 0 ? clamp01(localTime / window) : 0;
       t = merge(t, e.fn(p));
     }
@@ -231,7 +232,7 @@ export function computeTransform(
   if (cfg.in && cfg.in.animId !== NONE_ID) {
     const e = BY_ID.get(cfg.in.animId);
     if (e) {
-      const inDur = cfg.in.fullDuration ? clipDur : Math.min(cfg.in.duration, clipDur);
+      const inDur = (cfg.in.fullDuration ? clipDur : Math.min(cfg.in.duration, clipDur)) / spd(cfg.in);
       if (inDur > 0 && localTime < inDur) {
         t = merge(t, e.fn(clamp01(localTime / inDur)));
       }
@@ -241,7 +242,7 @@ export function computeTransform(
   if (cfg.out && cfg.out.animId !== NONE_ID) {
     const e = BY_ID.get(cfg.out.animId);
     if (e) {
-      const outDur = cfg.out.fullDuration ? clipDur : Math.min(cfg.out.duration, clipDur);
+      const outDur = (cfg.out.fullDuration ? clipDur : Math.min(cfg.out.duration, clipDur)) / spd(cfg.out);
       if (outDur > 0 && localTime > clipDur - outDur) {
         t = merge(t, e.fn(clamp01(1 - (clipDur - localTime) / outDur)));
       }
@@ -251,14 +252,20 @@ export function computeTransform(
   return t;
 }
 
+/** Speed multiplier of an animation slot, clamped to a sane range. */
+function spd(a: { speed?: number }): number {
+  const s = a.speed || 1;
+  return s < 0.1 ? 0.1 : s > 5 ? 5 : s;
+}
+
 /**
  * Does this clip's animation config request more time than the clip has?
  * Used to highlight clips that need manual duration adjustment (never forced).
  */
 export function isOverDuration(cfg: ClipAnimationConfig | undefined, clipDur: number): boolean {
   if (!cfg || clipDur <= 0) return false;
-  const inDur = cfg.in && !cfg.in.fullDuration && cfg.in.animId !== NONE_ID ? cfg.in.duration : 0;
-  const outDur = cfg.out && !cfg.out.fullDuration && cfg.out.animId !== NONE_ID ? cfg.out.duration : 0;
+  const inDur = cfg.in && !cfg.in.fullDuration && cfg.in.animId !== NONE_ID ? cfg.in.duration / spd(cfg.in) : 0;
+  const outDur = cfg.out && !cfg.out.fullDuration && cfg.out.animId !== NONE_ID ? cfg.out.duration / spd(cfg.out) : 0;
   if (inDur > clipDur + 1e-6) return true;
   if (outDur > clipDur + 1e-6) return true;
   if (inDur + outDur > clipDur + 1e-6) return true;

@@ -375,6 +375,28 @@ export async function exportVideo(input: VideoExportInput): Promise<Blob> {
   report(0.97, 'Finalizing MP4…');
   muxer.finalize();
   const buffer: ArrayBuffer = (target as any).buffer;
+  scrubFingerprint(buffer);
   report(1, 'Done');
   return new Blob([buffer], { type: 'video/mp4' });
+}
+
+// The muxer writes its own name ("mp4-muxer-hdlr") into each track's handler
+// box — a tool fingerprint. Overwrite it in-place with a neutral, generic ISO
+// handler name (same byte length, so box sizes stay valid). We do not fake any
+// other editor's identity; we only remove the machine tag.
+function scrubFingerprint(buffer: ArrayBuffer): void {
+  const bytes = new Uint8Array(buffer);
+  const needle = 'mp4-muxer-hdlr';
+  const replacement = 'ISO Media file'; // exactly 14 chars, same as the needle
+  const find = [...needle].map((c) => c.charCodeAt(0));
+  for (let i = 0; i <= bytes.length - find.length; i++) {
+    let match = true;
+    for (let j = 0; j < find.length; j++) {
+      if (bytes[i + j] !== find[j]) { match = false; break; }
+    }
+    if (match) {
+      for (let j = 0; j < replacement.length; j++) bytes[i + j] = replacement.charCodeAt(j);
+      i += find.length - 1;
+    }
+  }
 }

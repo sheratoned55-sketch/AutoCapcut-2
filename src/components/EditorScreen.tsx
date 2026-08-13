@@ -114,6 +114,7 @@ export function EditorScreen() {
 
   return (
     <div className="min-h-screen bg-neutral-950 text-white flex flex-col">
+      <ExportOverlay />
       {/* Top bar */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800 bg-neutral-900">
         <div className="flex items-center gap-3">
@@ -776,6 +777,7 @@ function AnimationPanel() {
   const [selectedAnimId, setSelectedAnimId] = useState<string>('');
   const [duration, setDuration] = useState(0.7);
   const [fullDuration, setFullDuration] = useState(false);
+  const [speed, setSpeed] = useState(1);
   const [selectedMedia, setSelectedMedia] = useState<Set<string>>(new Set());
   const [sequence, setSequence] = useState<{ slot: AnimCategory; anim: ClipAnim }[]>([]);
   // Transitions
@@ -817,7 +819,7 @@ function AnimationPanel() {
   const tags = allTags(category);
 
   const currentAnim: ClipAnim | null = selectedAnimId
-    ? { animId: selectedAnimId, duration, fullDuration }
+    ? { animId: selectedAnimId, duration, fullDuration, speed }
     : null;
 
   const pickAnim = (id: string) => {
@@ -825,6 +827,12 @@ function AnimationPanel() {
     const def = getAnim(id);
     if (def && def.defaultDuration > 0) setDuration(def.defaultDuration);
     else if (def && def.defaultDuration === 0) setDuration(2);
+    setSpeed(settings?.animationSpeeds?.[id] ?? 1);
+  };
+  const changeSpeed = (v: number) => {
+    const s = Math.max(0.25, Math.min(3, Math.round(v * 100) / 100));
+    setSpeed(s);
+    if (selectedAnimId) store.setAnimationSpeed(selectedAnimId, s);
   };
   const slotOf = (id: string): AnimCategory => animCategory(id) || category;
 
@@ -832,6 +840,8 @@ function AnimationPanel() {
   const applySelected = () => {
     if (currentAnim && selectedMedia.size > 0) store.applyAnimation(slotOf(selectedAnimId), currentAnim, Array.from(selectedMedia));
   };
+  const randomAll = () => store.applyRandomAnimation(category, { duration, fullDuration });
+  const randomSelected = () => { if (selectedMedia.size > 0) store.applyRandomAnimation(category, { duration, fullDuration }, Array.from(selectedMedia)); };
   const addToSequence = () => { if (currentAnim) setSequence((s) => [...s, { slot: slotOf(selectedAnimId), anim: currentAnim }]); };
   const applySequence = (toSelected: boolean) => {
     if (sequence.length === 0) return;
@@ -971,11 +981,25 @@ function AnimationPanel() {
               <input type="checkbox" checked={fullDuration} onChange={(e) => setFullDuration(e.target.checked)} className="w-4 h-4 accent-purple-500" />
               <span className="text-xs text-neutral-400">Full image duration</span>
             </label>
+            {/* Speed */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-neutral-400">Speed</span>
+              <input
+                type="range" min="0.25" max="3" step="0.05" value={speed}
+                onChange={(e) => changeSpeed(parseFloat(e.target.value))}
+                className="w-28 accent-purple-500"
+              />
+              <span className="text-xs text-white font-mono w-9 text-right">{speed.toFixed(2)}×</span>
+              <button onClick={() => changeSpeed(1)} title="Reset speed" className="text-[11px] text-neutral-400 hover:text-neutral-200 border border-neutral-700 rounded px-1.5 py-0.5">reset</button>
+            </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <button onClick={applyAll} disabled={!currentAnim} className="text-xs bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white rounded-lg px-4 py-2 font-medium transition-colors">Apply to all images</button>
             <button onClick={applySelected} disabled={!currentAnim || selectedMedia.size === 0} className="text-xs bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-800 disabled:text-neutral-600 text-white rounded-lg px-4 py-2 font-medium transition-colors border border-neutral-600">Apply to {selectedMedia.size} selected</button>
             <button onClick={addToSequence} disabled={!currentAnim} className="text-xs bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-800 disabled:text-neutral-600 text-white rounded-lg px-3 py-2 font-medium transition-colors border border-neutral-600">+ Add to sequence</button>
+            <span className="mx-1 h-4 w-px bg-neutral-700" />
+            <button onClick={randomAll} title="Give every image a random animation from this tab" className="text-xs bg-fuchsia-700/70 hover:bg-fuchsia-600 text-white rounded-lg px-3 py-2 font-medium transition-colors">🎲 Randomize all</button>
+            <button onClick={randomSelected} disabled={selectedMedia.size === 0} className="text-xs bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-800 disabled:text-neutral-600 text-white rounded-lg px-3 py-2 font-medium transition-colors border border-neutral-600">🎲 Random → {selectedMedia.size} selected</button>
             <span className="mx-1 h-4 w-px bg-neutral-700" />
             <button onClick={() => setSelectedMedia(new Set(imageClips.map((c) => c.media.id)))} className="text-xs text-blue-400 hover:text-blue-300">Select all ({imageClips.length})</button>
             <button onClick={() => setSelectedMedia(new Set())} className="text-xs text-neutral-400 hover:text-neutral-200">Clear selection</button>
@@ -1005,7 +1029,7 @@ function AnimationPanel() {
         </div>
 
         {/* Per-image list */}
-        <ImageClipGrid imageClips={imageClips} imageUrls={imageUrls} project={project} selectedMedia={selectedMedia} toggleSelect={toggleSelect} onClear={(id) => store.clearClipAnimations(id)} showAnim />
+        <ImageClipGrid imageClips={imageClips} imageUrls={imageUrls} project={project} selectedMedia={selectedMedia} toggleSelect={toggleSelect} onClear={(id) => store.clearClipAnimations(id)} showAnim onAdjustSpeed={(id, f) => store.adjustClipSpeed(id, f)} onResetSpeed={(id) => store.resetClipSpeed(id)} />
       </>) : (<>
         {/* Transitions */}
         <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
@@ -1029,7 +1053,7 @@ function AnimationPanel() {
           {transCatalog.map((t) => (
             <button
               key={t.id}
-              onClick={() => { setTransId(t.id); setTransDuration(transitionDefaultDuration(t.id)); }}
+              onClick={() => { setTransId(t.id); setTransDuration(settings?.transitionDurations?.[t.id] ?? transitionDefaultDuration(t.id)); }}
               className={`relative rounded-lg border p-3 h-20 flex items-center justify-center text-center transition-all ${transId === t.id ? 'border-purple-500 ring-2 ring-purple-500/40 bg-purple-600/10' : 'border-neutral-800 hover:border-neutral-600 bg-neutral-900'}`}
             >
               <span className="text-xs text-neutral-200">{t.name}</span>
@@ -1042,7 +1066,7 @@ function AnimationPanel() {
           <div className="flex items-center gap-4 flex-wrap">
             <div className="flex items-center gap-2"><span className="text-xs text-neutral-400">Selected:</span><span className="text-sm text-white font-medium">{transitionName(transId)}</span></div>
             <label className="flex items-center gap-2"><span className="text-xs text-neutral-400">Duration</span>
-              <input type="number" step="0.1" min="0.1" value={transDuration} onChange={(e) => setTransDuration(Math.max(0.1, parseFloat(e.target.value) || 0.1))} className="w-20 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-purple-500" />
+              <input type="number" step="0.1" min="0.1" value={transDuration} onChange={(e) => { const v = Math.max(0.1, parseFloat(e.target.value) || 0.1); setTransDuration(v); if (transId) store.setTransitionDuration(transId, v); }} className="w-20 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-purple-500" />
               <span className="text-xs text-neutral-500">sec</span>
             </label>
           </div>
@@ -1061,9 +1085,10 @@ function AnimationPanel() {
 }
 
 // Grid of image clips with their assigned animation/transition badges.
-function ImageClipGrid({ imageClips, imageUrls, project, selectedMedia, toggleSelect, onClear, showAnim, showTrans }: {
+function ImageClipGrid({ imageClips, imageUrls, project, selectedMedia, toggleSelect, onClear, showAnim, showTrans, onAdjustSpeed, onResetSpeed }: {
   imageClips: Clip[]; imageUrls: Map<string, string>; project: any; selectedMedia: Set<string>;
   toggleSelect: (id: string) => void; onClear: (id: string) => void; showAnim?: boolean; showTrans?: boolean;
+  onAdjustSpeed?: (id: string, factor: number) => void; onResetSpeed?: (id: string) => void;
 }) {
   return (
     <div className="space-y-2">
@@ -1096,6 +1121,15 @@ function ImageClipGrid({ imageClips, imageUrls, project, selectedMedia, toggleSe
                 {over && (
                   <div className="flex items-center gap-1 text-[10px] text-red-400">
                     <AlertTriangle size={10} /> Animation longer than image ({clip.duration.toFixed(1)}s) — adjust manually
+                  </div>
+                )}
+                {showAnim && hasAnimation(cfg) && onAdjustSpeed && (
+                  <div className="flex items-center gap-1">
+                    <span className="text-[10px] text-neutral-500">Speed</span>
+                    <button onClick={() => onAdjustSpeed(clip.media.id, 1 / 1.25)} className="text-[11px] leading-none text-neutral-300 hover:text-white border border-neutral-700 rounded w-5 h-5">−</button>
+                    <span className="text-[10px] text-neutral-300 font-mono w-9 text-center">{((cfg?.combo?.speed || cfg?.in?.speed || cfg?.out?.speed || 1)).toFixed(2)}×</span>
+                    <button onClick={() => onAdjustSpeed(clip.media.id, 1.25)} className="text-[11px] leading-none text-neutral-300 hover:text-white border border-neutral-700 rounded w-5 h-5">+</button>
+                    <button onClick={() => onResetSpeed && onResetSpeed(clip.media.id)} className="text-[10px] text-neutral-500 hover:text-neutral-200 ml-1">reset</button>
                   </div>
                 )}
                 {((showAnim && hasAnimation(cfg)) || (showTrans && hasTrans)) && (
@@ -1483,10 +1517,7 @@ function VideoExportSection() {
   const [fps, setFps] = useState<30 | 60>(30);
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
   const [imageFit, setImageFit] = useState<ImageFit>('cover');
-  const [exporting, setExporting] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [progressMsg, setProgressMsg] = useState('');
-  const cancelRef = useRef<{ cancelled: boolean }>({ cancelled: false });
+  const exporting = !!store.videoExportState?.active;
 
   useEffect(() => {
     if (project?.videoExport) {
@@ -1500,28 +1531,8 @@ function VideoExportSection() {
   if (!project) return null;
   const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'Untitled';
 
-  const handleExport = async () => {
-    const settings: VideoExportSettings = { resolution, fps, aspectRatio, imageFit };
-    store.updateProject({ videoExport: settings });
-    setExporting(true);
-    setProgress(0);
-    setProgressMsg('Starting…');
-    cancelRef.current = { cancelled: false };
-    try {
-      const blob = await store.exportVideo(settings, (f, m) => { setProgress(f); setProgressMsg(m); }, cancelRef.current);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${safeName}_${resolution}_${fps}fps.mp4`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e: any) {
-      if (e.message !== 'Export cancelled') store.addLog(`Video export failed: ${e.message}`, 'error');
-    } finally {
-      setExporting(false);
-      setProgress(0);
-      setProgressMsg('');
-    }
+  const handleExport = () => {
+    store.startVideoExport({ resolution, fps, aspectRatio, imageFit });
   };
 
   const res = RESOLUTIONS[resolution];
@@ -1591,28 +1602,55 @@ function VideoExportSection() {
       </div>
       <p className="text-xs text-neutral-500">Output: <span className="text-neutral-300 font-mono">{dims.w}×{dims.h}</span> @ {fps}fps</p>
 
-      {exporting ? (
-        <div className="space-y-2">
-          <div className="h-2 bg-neutral-800 rounded-full overflow-hidden">
-            <div className="h-full bg-purple-500 transition-all" style={{ width: `${Math.round(progress * 100)}%` }} />
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400">{progressMsg} ({Math.round(progress * 100)}%)</span>
-            <button onClick={() => { cancelRef.current.cancelled = true; }} className="text-xs text-red-400 hover:text-red-300">
-              Cancel
-            </button>
-          </div>
-        </div>
-      ) : (
-        <button
-          onClick={handleExport}
-          disabled={!project.processed || project.clips.length === 0}
-          className="flex items-center gap-2 bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors"
-        >
-          <Download size={16} /> Export {res.label} MP4
-        </button>
-      )}
+      <button
+        onClick={handleExport}
+        disabled={!project.processed || project.clips.length === 0 || exporting}
+        className="flex items-center gap-2 bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+      >
+        {exporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+        {exporting ? 'Exporting…' : `Export ${res.label} MP4`}
+      </button>
+      {exporting && <p className="text-xs text-neutral-400">Export runs in the background — you can switch tabs or minimize. Progress is shown at the top.</p>}
       {!project.processed && <p className="text-xs text-yellow-500">Run the Process pipeline first.</p>}
+    </div>
+  );
+}
+
+// Global export overlay — visible on every tab while a render is running.
+function ExportOverlay() {
+  const { videoExportState: st, cancelVideoExport } = useStore();
+  if (!st) return null;
+  const pct = Math.round(st.progress * 100);
+  return (
+    <div className="fixed inset-x-0 top-0 z-50 flex justify-center px-4 pointer-events-none">
+      <div className="mt-3 w-full max-w-md bg-neutral-900/95 backdrop-blur border border-neutral-700 rounded-xl shadow-2xl p-4 pointer-events-auto">
+        {st.error ? (
+          <div className="flex items-start gap-2 text-sm text-red-300">
+            <AlertOctagon size={16} className="mt-0.5 shrink-0" />
+            <span>Export failed: {st.error}</span>
+          </div>
+        ) : st.done ? (
+          <div className="flex items-center gap-2 text-sm text-green-300">
+            <CheckCircle2 size={16} /> {st.message} — check your Downloads.
+          </div>
+        ) : (
+          <>
+            <div className="flex items-center justify-between mb-2">
+              <span className="flex items-center gap-2 text-sm font-medium text-neutral-100">
+                <Film size={15} className="text-purple-400" /> Exporting video
+              </span>
+              <span className="text-xs text-neutral-400 font-mono tabular-nums">{pct}%</span>
+            </div>
+            <div className="h-2 bg-neutral-800 rounded-full overflow-hidden">
+              <div className="h-full bg-gradient-to-r from-purple-500 to-fuchsia-400 transition-all" style={{ width: `${pct}%` }} />
+            </div>
+            <div className="flex items-center justify-between mt-2">
+              <span className="text-xs text-neutral-400 truncate pr-2">{st.message}</span>
+              <button onClick={cancelVideoExport} className="text-xs text-red-400 hover:text-red-300 shrink-0">Cancel</button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

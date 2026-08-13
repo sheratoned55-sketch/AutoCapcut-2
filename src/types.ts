@@ -107,6 +107,8 @@ export interface ClipAnim {
   duration: number;
   /** when true the animation spans the clip's full duration (duration ignored) */
   fullDuration: boolean;
+  /** playback speed multiplier (1 = default, >1 faster, <1 slower) */
+  speed?: number;
 }
 
 /** Per-clip animation config. `combo` (if set) replaces in+out. */
@@ -203,4 +205,8 @@ export interface AppSettings {
   imageOffsetSec?: number;
   /** Ids of animations the user has starred as favorites. */
   favoriteAnimations?: string[];
+  /** Remembered speed per animation id, so it carries into new projects. */
+  animationSpeeds?: Record<string, number>;
+  /** Remembered duration per transition id, so it carries into new projects. */
+  transitionDurations?: Record<string, number>;
 }
