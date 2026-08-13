@@ -9,4 +9,10 @@ contextBridge.exposeInMainWorld('autocapcut', {
   // Native offline transcription (whisper.cpp) — fast, local, free.
   nativeAvailable: () => ipcRenderer.invoke('native-available'),
   nativeTranscribe: (wavBuffer) => ipcRenderer.invoke('native-transcribe', { wavBuffer }),
+  // Video export folder (remembered across projects) + reveal in file manager.
+  getExportDir: () => ipcRenderer.invoke('get-export-dir'),
+  setExportDir: (dir) => ipcRenderer.invoke('set-export-dir', dir),
+  pickExportDir: () => ipcRenderer.invoke('pick-export-dir'),
+  revealPath: (p) => ipcRenderer.invoke('reveal-path', p),
+  onExportSaved: (cb) => ipcRenderer.on('export-saved', (_e, p) => cb(p)),
 });

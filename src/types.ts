@@ -209,4 +209,6 @@ export interface AppSettings {
   animationSpeeds?: Record<string, number>;
   /** Remembered duration per transition id, so it carries into new projects. */
   transitionDurations?: Record<string, number>;
+  /** Folder where exported MP4s are saved (desktop app), remembered across projects. */
+  exportFolder?: string;
 }

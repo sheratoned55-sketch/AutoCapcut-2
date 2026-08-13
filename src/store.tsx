@@ -65,6 +65,12 @@ interface StoreContextValue {
   videoExportState: VideoExportState | null;
   startVideoExport: (settings: VideoExportSettings) => Promise<void>;
   cancelVideoExport: () => void;
+  /** Desktop app: chosen export folder + last saved file + helpers. */
+  nativeExport: boolean;
+  videoExportFolder: string | null;
+  lastExportPath: string | null;
+  pickVideoExportFolder: () => Promise<void>;
+  revealLastExport: () => void;
   exportVideo: (settings: VideoExportSettings, onProgress: (f: number, m: string) => void, signal: CancelSignal) => Promise<Blob>;
   importTemplate: () => Promise<CapCutTemplate | null>;
   templates: CapCutTemplate[];
@@ -125,6 +131,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [videoExportState, setVideoExportState] = useState<VideoExportState | null>(null);
   const exportCancelRef = useRef<CancelSignal>({ cancelled: false });
+  const nativeBridge = (typeof window !== 'undefined' ? (window as any).autocapcut : null) || null;
+  const nativeExport = !!(nativeBridge && nativeBridge.getExportDir);
+  const [videoExportFolder, setVideoExportFolder] = useState<string | null>(null);
+  const [lastExportPath, setLastExportPath] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Lets the user bail out of a slow transcription and fall back to even timing.
   const cancelTranscribeRef = useRef(false);
@@ -1201,8 +1211,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       a.download = `${safeName}_${settings.resolution}_${settings.fps}fps.mp4`;
       a.click();
       URL.revokeObjectURL(url);
-      setVideoExportState({ active: false, progress: 1, message: `Saved ${settings.resolution} MP4`, done: true });
-      setTimeout(() => setVideoExportState((s) => (s && s.done ? null : s)), 5000);
+      const where = nativeExport ? (videoExportFolder ? `Saved to ${videoExportFolder}` : 'Saved to your export folder') : 'Saved to your Downloads folder';
+      setVideoExportState({ active: false, progress: 1, message: where, done: true });
+      setTimeout(() => setVideoExportState((s) => (s && s.done ? null : s)), 8000);
     } catch (e: any) {
       if (e.message === 'Export cancelled') {
         setVideoExportState(null);
@@ -1212,7 +1223,41 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setTimeout(() => setVideoExportState((s) => (s && s.error ? null : s)), 8000);
       }
     }
-  }, [currentProject, videoExportState, updateProject, exportVideo, addLog]);
+  }, [currentProject, videoExportState, updateProject, exportVideo, addLog, nativeExport, videoExportFolder]);
+
+  const pickVideoExportFolder = useCallback(async () => {
+    if (!nativeBridge?.pickExportDir) return;
+    const dir = await nativeBridge.pickExportDir();
+    if (dir) {
+      setVideoExportFolder(dir);
+      const base = settings || { draftsRootPath: '', username: '' };
+      const next = { ...base, exportFolder: dir };
+      await setSetting('appSettings', next);
+      setSettings(next);
+      addLog(`Export folder set to: ${dir}`);
+    }
+  }, [nativeBridge, settings, addLog]);
+
+  const revealLastExport = useCallback(() => {
+    if (nativeBridge?.revealPath && lastExportPath) nativeBridge.revealPath(lastExportPath);
+  }, [nativeBridge, lastExportPath]);
+
+  // Desktop app: learn where exported videos are saved, and hear when one lands.
+  useEffect(() => {
+    if (!nativeBridge) return;
+    nativeBridge.onExportSaved?.((p: string) => setLastExportPath(p));
+  }, [nativeBridge]);
+  useEffect(() => {
+    if (!nativeBridge?.getExportDir) return;
+    (async () => {
+      if (settings?.exportFolder && nativeBridge.setExportDir) {
+        await nativeBridge.setExportDir(settings.exportFolder);
+        setVideoExportFolder(settings.exportFolder);
+      } else {
+        try { setVideoExportFolder(await nativeBridge.getExportDir()); } catch { /* ignore */ }
+      }
+    })();
+  }, [nativeBridge, settings?.exportFolder]);
 
   const loadTemplates = useCallback(async () => {
     const tpls = await getAllTemplates();
@@ -1339,6 +1384,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     videoExportState,
     startVideoExport,
     cancelVideoExport,
+    nativeExport,
+    videoExportFolder,
+    lastExportPath,
+    pickVideoExportFolder,
+    revealLastExport,
     exportVideo,
     importTemplate,
     templates,
