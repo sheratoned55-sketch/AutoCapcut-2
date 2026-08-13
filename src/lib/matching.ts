@@ -234,7 +234,30 @@ function stripOuterQuotes(s: string): string {
   return trimmed;
 }
 
+// A line that is ONLY a number, e.g. "1", "01", "(1)", "1.", "[1]".
 const NUMBER_LINE_RE = /^\s*#?\s*[\(\[]?\s*(\d+)\s*[\.\)]?[\)\]]?\s*$/;
+// A numbered HEADER line: a number + delimiter + trailing content on the same
+// line, e.g. "1. [00:00 - 00:18] (~45 words)" or "1) First paragraph text".
+const HEADER_LINE_RE = /^\s*#?\s*[\(\[]?\s*(\d+)\s*[\.\):\]]\s+(\S.*)$/;
+// Metadata we strip from a header's trailing text so it never leaks into the
+// segment: timestamps like "[00:00 - 00:18]" and word counts like "(~45 words)".
+const HEADER_META_RE = [
+  /\[\s*\d{1,2}:\d{2}(?::\d{2})?\s*-\s*\d{1,2}:\d{2}(?::\d{2})?\s*\]/g,
+  /\(\s*~?\s*\d+\s*words?\s*\)/gi,
+];
+
+/** Match a segment-marker line, returning its number and any inline text. */
+function matchMarker(line: string): { index: number; rest: string } | null {
+  const numOnly = line.match(NUMBER_LINE_RE);
+  if (numOnly) return { index: parseInt(numOnly[1], 10), rest: '' };
+  const header = line.match(HEADER_LINE_RE);
+  if (header) {
+    let rest = header[2] || '';
+    for (const re of HEADER_META_RE) rest = rest.replace(re, '');
+    return { index: parseInt(header[1], 10), rest: rest.trim() };
+  }
+  return null;
+}
 
 export type ScriptMode = 'number' | 'blank';
 
@@ -244,16 +267,25 @@ export interface ParseResult {
   warnings: string[];
 }
 
-/** Detect whether the script uses number-line splitting (3+ ascending number-only lines). */
+/**
+ * Detect whether the script uses number-line splitting. True when several
+ * marker lines (bare numbers OR "N. …" headers) appear and form a mostly
+ * ascending run — which avoids mistaking stray decimals in prose for markers.
+ */
 export function detectScriptMode(text: string): ScriptMode {
   const lines = text.split(/\n/);
   const nums: number[] = [];
   for (const line of lines) {
-    const m = line.match(NUMBER_LINE_RE);
-    if (m) nums.push(parseInt(m[1], 10));
+    const m = matchMarker(line);
+    if (m) nums.push(m.index);
   }
-  if (nums.length >= 2) return 'number';
-  return 'blank';
+  if (nums.length < 2) return 'blank';
+  // Count ascending steps (n === prev + 1). A real numbered script climbs
+  // 1,2,3,…; random decimals won't.
+  let ascending = 0;
+  for (let i = 1; i < nums.length; i++) if (nums[i] === nums[i - 1] + 1) ascending++;
+  if (nums.length >= 3 && ascending < nums.length * 0.5) return 'blank';
+  return 'number';
 }
 
 export function parseSegments(text: string): string[] {
@@ -283,16 +315,18 @@ export function parseScriptFull(text: string): ParseResult {
     };
   }
 
-  // Number mode: split at number-only lines
+  // Number mode: split at marker lines (bare numbers or "N. …" headers).
   const lines = text.split(/\n/);
   const rawSegments: { index: number; text: string }[] = [];
   let current: { index: number; text: string } | null = null;
 
   for (const line of lines) {
-    const m = line.match(NUMBER_LINE_RE);
+    const m = matchMarker(line);
     if (m) {
       if (current) rawSegments.push(current);
-      current = { index: parseInt(m[1], 10), text: '' };
+      // Any inline text after the number (a header's text, minus metadata)
+      // seeds the segment.
+      current = { index: m.index, text: m.rest };
     } else if (current) {
       const t = line.trim();
       if (t) {
