@@ -1,0 +1,1375 @@
+import { useState, useRef, useEffect, useCallback } from 'react';
+import {
+  ArrowLeft, Play, Pause, Download, RefreshCw, Loader2, CheckCircle2, AlertCircle,
+  ChevronRight, FileVideo, FileImage, Clock, AlertTriangle, Settings, Terminal,
+  RotateCw, FolderOpen, X, Plus, Upload, Check, AlertOctagon, Trash2
+} from 'lucide-react';
+import { useStore } from '../store';
+import { Segment, Clip, CapCutTemplate } from '../types';
+import { parseScriptFull, detectScriptMode, parseSegments, verifySegmentFill, segmentPreview, type SegmentVerification } from '../lib/matching';
+import { ValidationReport } from '../lib/export';
+import { buildPartOffsets } from '../lib/audio';
+
+function fmtTime(s: number): string {
+  if (!s || isNaN(s)) return '0:00.0';
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${sec.toFixed(1).padStart(4, '0')}`;
+}
+
+const SEGMENT_COLORS = [
+  '#3b82f6', '#06b6d4', '#10b981', '#f59e0b', '#ef4444',
+  '#8b5cf6', '#ec4899', '#14b8a6', '#f97316', '#6366f1',
+];
+
+function segColor(idx: number): string {
+  return SEGMENT_COLORS[idx % SEGMENT_COLORS.length];
+}
+
+export function EditorScreen() {
+  const store = useStore();
+  const { currentProject: project } = store;
+  const [activeTab, setActiveTab] = useState<'segments' | 'timeline' | 'preview' | 'export'>('segments');
+  const [scriptText, setScriptText] = useState('');
+  const [selectedClip, setSelectedClip] = useState<Clip | null>(null);
+
+  if (!project) return null;
+
+  const [parseMode, setParseMode] = useState<'number' | 'blank' | null>(null);
+  const [parseWarnings, setParseWarnings] = useState<string[]>([]);
+  const [detectedCount, setDetectedCount] = useState<number | null>(null);
+
+  // Live detection as user types
+  useEffect(() => {
+    if (!scriptText.trim()) { setParseMode(null); setDetectedCount(null); setParseWarnings([]); return; }
+    const mode = detectScriptMode(scriptText);
+    setParseMode(mode);
+    if (mode === 'number') {
+      const result = parseScriptFull(scriptText);
+      setDetectedCount(result.segments.length);
+      setParseWarnings(result.warnings);
+    } else {
+      const texts = parseSegments(scriptText);
+      setDetectedCount(texts.length);
+      setParseWarnings([]);
+    }
+  }, [scriptText]);
+
+  const handleParseScript = () => {
+    if (!scriptText.trim()) return;
+    const result = parseScriptFull(scriptText);
+    const segs: Segment[] = result.segments.map((s) => ({
+      id: crypto.randomUUID(),
+      index: s.index,
+      text: s.text,
+      startTime: 0,
+      endTime: 0,
+      confidence: 0,
+      lowConfidence: false,
+      matchedMedia: [],
+      hasVideo: false,
+      hasImages: false,
+      hasMedia: false,
+    }));
+    store.updateSegments(segs);
+    store.addLog(`Parsed ${segs.length} segments (${result.mode} split)`);
+    for (const w of result.warnings) store.addLog(w, 'warn');
+  };
+
+  const addSegment = () => {
+    const segs = [...project.segments, {
+      id: crypto.randomUUID(),
+      index: project.segments.length + 1,
+      text: '',
+      startTime: 0,
+      endTime: 0,
+      confidence: 0,
+      lowConfidence: false,
+      matchedMedia: [],
+      hasVideo: false,
+      hasImages: false,
+      hasMedia: false,
+    }];
+    store.updateSegments(segs);
+  };
+
+  const updateSegmentText = (id: string, text: string) => {
+    const segs = project.segments.map(s => s.id === id ? { ...s, text } : s);
+    store.updateSegments(segs);
+  };
+
+  const updateSegmentTime = (id: string, field: 'startTime' | 'endTime', value: number) => {
+    const segs = project.segments.map(s => s.id === id ? { ...s, [field]: value } : s);
+    store.updateSegments(segs);
+  };
+
+  const removeSegment = (id: string) => {
+    const segs = project.segments.filter(s => s.id !== id).map((s, i) => ({ ...s, index: i + 1 }));
+    store.updateSegments(segs);
+  };
+
+  return (
+    <div className="min-h-screen bg-neutral-950 text-white flex flex-col">
+      {/* Top bar */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800 bg-neutral-900">
+        <div className="flex items-center gap-3">
+          <button onClick={store.closeProject} className="text-neutral-400 hover:text-white transition-colors">
+            <ArrowLeft size={20} />
+          </button>
+          <h1 className="font-medium">{project.name}</h1>
+          <span className="text-[11px] text-neutral-500 border border-neutral-700 rounded px-1.5 py-0.5">v{__APP_VERSION__}</span>
+          {project.processed && (
+            <span className="flex items-center gap-1 text-xs text-green-400 bg-green-950/50 px-2 py-0.5 rounded-full">
+              <CheckCircle2 size={12} /> Ready
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {project.folders.mode === 'native' && (
+            <button
+              onClick={store.reconnectFolders}
+              className="flex items-center gap-1.5 text-sm text-neutral-400 hover:text-white bg-neutral-800 hover:bg-neutral-700 rounded-lg px-3 py-1.5 transition-colors"
+            >
+              <FolderOpen size={14} /> Reconnect
+            </button>
+          )}
+          <button
+            onClick={() => store.runPipeline()}
+            disabled={project.segments.length === 0}
+            className="flex items-center gap-1.5 text-sm bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white rounded-lg px-4 py-1.5 font-medium transition-colors"
+          >
+            <Play size={14} /> Process
+          </button>
+        </div>
+      </div>
+
+      {/* Pipeline progress */}
+      <PipelinePanel />
+
+      {/* Tabs */}
+      <div className="flex items-center gap-1 px-4 border-b border-neutral-800 bg-neutral-900">
+        {(['segments', 'timeline', 'preview', 'export'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={`px-4 py-2.5 text-sm font-medium capitalize transition-colors border-b-2 ${
+              activeTab === tab
+                ? 'text-white border-blue-500'
+                : 'text-neutral-400 border-transparent hover:text-neutral-200'
+            }`}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto">
+        {activeTab === 'segments' && (
+          <SegmentsPanel
+            scriptText={scriptText}
+            setScriptText={setScriptText}
+            onParse={handleParseScript}
+            onAdd={addSegment}
+            onUpdateText={updateSegmentText}
+            onUpdateTime={updateSegmentTime}
+            onRemove={removeSegment}
+            parseMode={parseMode}
+            detectedCount={detectedCount}
+            parseWarnings={parseWarnings}
+          />
+        )}
+        {activeTab === 'timeline' && (
+          <TimelinePanel
+            clips={project.clips}
+            segments={project.segments}
+            audioDuration={project.audioDuration}
+            selectedClip={selectedClip}
+            onSelectClip={setSelectedClip}
+          />
+        )}
+        {activeTab === 'preview' && (
+          <PreviewPanel clips={project.clips} audioDuration={project.audioDuration} />
+        )}
+        {activeTab === 'export' && <ExportPanel />}
+      </div>
+
+      {/* Log panel */}
+      <LogPanel />
+    </div>
+  );
+}
+
+// ─── Pipeline Panel ───────────────────────────────────────────
+
+function PipelinePanel() {
+  const { currentProject: project, runPipeline, skipTranscription } = useStore();
+  if (!project) return null;
+  const steps = project.pipelineSteps;
+  const hasActive = steps.some(s => s.status === 'running' || s.status === 'error');
+
+  if (!hasActive && project.processed) return null;
+
+  return (
+    <div className="px-4 py-3 border-b border-neutral-800 bg-neutral-900/50">
+      <div className="flex items-center gap-2 overflow-x-auto">
+        {steps.map((step, i) => (
+          <div key={step.key} className="flex items-center gap-2 shrink-0">
+            {i > 0 && <ChevronRight size={14} className="text-neutral-600" />}
+            <div className="flex items-center gap-2">
+              {step.status === 'pending' && <div className="w-4 h-4 rounded-full border border-neutral-600" />}
+              {step.status === 'running' && <Loader2 size={16} className="text-blue-400 animate-spin" />}
+              {step.status === 'done' && <CheckCircle2 size={16} className="text-green-400" />}
+              {step.status === 'error' && <AlertCircle size={16} className="text-red-400" />}
+              <div className="flex flex-col">
+                <span className={`text-xs font-medium ${
+                  step.status === 'done' ? 'text-green-400' :
+                  step.status === 'running' ? 'text-blue-400' :
+                  step.status === 'error' ? 'text-red-400' : 'text-neutral-500'
+                }`}>
+                  {step.label}
+                </span>
+                {step.message && (
+                  <span className="text-[10px] text-neutral-500">{step.message}</span>
+                )}
+              </div>
+              {step.status === 'running' && step.progress > 0 && (
+                <span className="text-[10px] text-neutral-400">{Math.round(step.progress)}%</span>
+              )}
+            </div>
+            {step.status === 'error' && (
+              <button
+                onClick={() => runPipeline()}
+                className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 ml-1"
+              >
+                <RotateCw size={12} /> Retry
+              </button>
+            )}
+            {step.key === 'transcribe' && step.status === 'running' && (
+              <button
+                onClick={() => skipTranscription()}
+                title="Stop transcribing and space the script evenly across the audio instead"
+                className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 border border-amber-500/40 rounded px-2 py-0.5 ml-1 whitespace-nowrap"
+              >
+                Skip transcription
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Segments Panel ───────────────────────────────────────────
+
+interface SegmentsPanelProps {
+  scriptText: string;
+  setScriptText: (s: string) => void;
+  onParse: () => void;
+  onAdd: () => void;
+  onUpdateText: (id: string, text: string) => void;
+  onUpdateTime: (id: string, field: 'startTime' | 'endTime', value: number) => void;
+  onRemove: (id: string) => void;
+  parseMode: 'number' | 'blank' | null;
+  detectedCount: number | null;
+  parseWarnings: string[];
+}
+
+function SegmentsPanel(props: SegmentsPanelProps) {
+  const { currentProject: project, retimeSegments } = useStore();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [shiftSecs, setShiftSecs] = useState(6);
+  if (!project) return null;
+
+  const toggleSelected = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  // Move every selected image earlier by `shiftSecs`. Non-selected images that
+  // are in the way shrink to make room; the timeline stays gap-free (each image
+  // ends exactly where the next begins), first at 0 and last at the audio end.
+  const applyTimingFix = async () => {
+    if (selected.size === 0) return;
+    const dur = project.audioDuration || 0;
+    const minDur = 0.2;
+    const ordered = [...project.segments].sort((a, b) => a.index - b.index);
+    const desired = ordered.map((s) =>
+      selected.has(s.id) ? Math.max(0, s.startTime - shiftSecs) : s.startTime,
+    );
+    const starts: number[] = [];
+    for (let i = 0; i < ordered.length; i++) {
+      let st = desired[i];
+      if (i > 0) st = Math.max(st, starts[i - 1] + minDur);
+      if (dur > 0) st = Math.min(st, dur - minDur);
+      starts.push(st);
+    }
+    if (starts.length) starts[0] = 0;
+    const retimed = ordered.map((seg, i) => ({
+      ...seg,
+      startTime: starts[i],
+      endTime: i < ordered.length - 1 ? starts[i + 1] : (dur || starts[i] + minDur),
+    }));
+    await retimeSegments(retimed);
+  };
+
+  return (
+    <div className="p-4 space-y-4">
+      {/* Script input */}
+      <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-medium text-neutral-300">Script Input</h3>
+          <button
+            onClick={props.onParse}
+            className="text-xs bg-blue-600 hover:bg-blue-500 text-white rounded-lg px-3 py-1 font-medium transition-colors"
+          >
+            Parse
+          </button>
+        </div>
+        <textarea
+          value={props.scriptText}
+          onChange={(e) => props.setScriptText(e.target.value)}
+          placeholder={`Paste your script here.\n\nTwo modes (auto-detected):\n\n1. Numbered segments:\n1\nFirst paragraph text...\n2\nSecond paragraph text...\n\n2. Blank-line split:\nFirst paragraph.\n\nSecond paragraph.`}
+          className="w-full h-32 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white placeholder-neutral-500 focus:outline-none focus:border-blue-500 resize-y"
+        />
+        <div className="flex items-center gap-3 mt-2 flex-wrap">
+          {props.parseMode && (
+            <span className={`text-xs px-2 py-0.5 rounded-full ${props.parseMode === 'number' ? 'bg-blue-950/50 text-blue-300' : 'bg-neutral-800 text-neutral-400'}`}>
+              Mode: {props.parseMode === 'number' ? 'Number-split' : 'Blank-line'}
+            </span>
+          )}
+          {props.detectedCount !== null && props.detectedCount > 0 && (
+            <span className="text-xs text-neutral-400">
+              {props.detectedCount} segments detected (numbered 1 to {props.detectedCount})
+            </span>
+          )}
+          {props.parseWarnings.map((w, i) => (
+            <span key={i} className="text-xs text-yellow-400 flex items-center gap-1">
+              <AlertTriangle size={10} /> {w}
+            </span>
+          ))}
+        </div>
+        {props.parseMode === 'number' && props.detectedCount && props.detectedCount > 0 && (() => {
+          const result = parseScriptFull(props.scriptText);
+          return (
+            <div className="mt-2 bg-neutral-800/50 rounded-lg p-2 max-h-40 overflow-y-auto">
+              <pre className="text-xs text-neutral-400 whitespace-pre-wrap font-mono">{segmentPreview(result.segments)}</pre>
+            </div>
+          );
+        })()}
+      </div>
+
+      {/* Per-image timing fix */}
+      {project.segments.length > 0 && (
+        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 space-y-2">
+          <h3 className="text-sm font-medium text-neutral-300 flex items-center gap-2">
+            <Clock size={14} /> Fix late images
+          </h3>
+          <p className="text-xs text-neutral-500">
+            Tick the images that appear late, set how many seconds late they are, then click the button.
+            Selected images move earlier by that many seconds; images in the way adjust automatically.
+          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-neutral-400">{selected.size} selected</span>
+            <button
+              onClick={() => setSelected(new Set(project.segments.map((s) => s.id)))}
+              className="text-xs text-blue-400 hover:text-blue-300"
+            >
+              Select all
+            </button>
+            <button
+              onClick={() => setSelected(new Set())}
+              className="text-xs text-neutral-400 hover:text-neutral-200"
+            >
+              Clear
+            </button>
+            <div className="flex items-center gap-1 ml-2">
+              <span className="text-xs text-neutral-400">Late by</span>
+              <input
+                type="number"
+                step="0.5"
+                value={shiftSecs}
+                onChange={(e) => setShiftSecs(parseFloat(e.target.value) || 0)}
+                className="w-16 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-blue-500"
+              />
+              <span className="text-xs text-neutral-400">sec</span>
+            </div>
+            <button
+              onClick={applyTimingFix}
+              disabled={selected.size === 0}
+              className="text-xs bg-amber-600 hover:bg-amber-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white rounded-lg px-3 py-1.5 font-medium transition-colors"
+            >
+              Move selected earlier by {shiftSecs}s
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Segment list */}
+      <div className="space-y-3">
+        {project.segments.map((seg) => (
+          <div
+            key={seg.id}
+            className={`bg-neutral-900 border rounded-xl p-4 ${selected.has(seg.id) ? 'border-amber-500' : 'border-neutral-800'}`}
+            style={{ borderLeftColor: segColor(seg.index - 1), borderLeftWidth: 3 }}
+          >
+            <div className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={selected.has(seg.id)}
+                onChange={() => toggleSelected(seg.id)}
+                title="Select this image to fix its timing"
+                className="mt-1.5 w-4 h-4 accent-amber-500 shrink-0 cursor-pointer"
+              />
+              <div
+                className="flex items-center justify-center w-7 h-7 rounded-lg text-xs font-bold shrink-0"
+                style={{ backgroundColor: segColor(seg.index - 1) + '30', color: segColor(seg.index - 1) }}
+              >
+                {seg.index}
+              </div>
+              <div className="flex-1 min-w-0">
+                <textarea
+                  value={seg.text}
+                  onChange={(e) => props.onUpdateText(seg.id, e.target.value)}
+                  className="w-full bg-transparent text-sm text-neutral-200 resize-none focus:outline-none border-none"
+                  rows={2}
+                  placeholder="Segment text..."
+                />
+                <div className="flex items-center gap-3 mt-2 flex-wrap">
+                  <div className="flex items-center gap-1">
+                    <Clock size={12} className="text-neutral-500" />
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={seg.startTime.toFixed(1)}
+                      onChange={(e) => props.onUpdateTime(seg.id, 'startTime', parseFloat(e.target.value) || 0)}
+                      className="w-16 bg-neutral-800 border border-neutral-700 rounded px-1.5 py-0.5 text-xs text-white focus:outline-none focus:border-blue-500"
+                    />
+                    <span className="text-neutral-500 text-xs">→</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={seg.endTime.toFixed(1)}
+                      onChange={(e) => props.onUpdateTime(seg.id, 'endTime', parseFloat(e.target.value) || 0)}
+                      className="w-16 bg-neutral-800 border border-neutral-700 rounded px-1.5 py-0.5 text-xs text-white focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  {seg.matchedMedia.length > 0 && (
+                    <span className="text-xs text-neutral-400">
+                      {seg.matchedMedia.length} media: {seg.matchedMedia.map(m => m.kind).join(', ')}
+                    </span>
+                  )}
+                  {seg.lowConfidence && (
+                    <span className="flex items-center gap-1 text-xs text-yellow-500 bg-yellow-950/30 px-2 py-0.5 rounded">
+                      <AlertTriangle size={10} /> Low confidence
+                    </span>
+                  )}
+                  {!seg.hasMedia && project.processed && (
+                    <span className="flex items-center gap-1 text-xs text-red-400 bg-red-950/30 px-2 py-0.5 rounded">
+                      <AlertTriangle size={10} /> Missing media
+                    </span>
+                  )}
+                  <button
+                    onClick={() => props.onRemove(seg.id)}
+                    className="text-neutral-500 hover:text-red-400 transition-colors ml-auto"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+        <button
+          onClick={props.onAdd}
+          className="w-full flex items-center justify-center gap-2 border border-dashed border-neutral-700 hover:border-neutral-500 rounded-xl py-3 text-sm text-neutral-400 hover:text-neutral-300 transition-colors"
+        >
+          <Plus size={16} /> Add Segment
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Timeline Panel ───────────────────────────────────────────
+
+interface TimelinePanelProps {
+  clips: Clip[];
+  segments: Segment[];
+  audioDuration: number;
+  selectedClip: Clip | null;
+  onSelectClip: (c: Clip | null) => void;
+}
+
+function TimelinePanel({ clips, segments, audioDuration, selectedClip, onSelectClip }: TimelinePanelProps) {
+  const totalDuration = audioDuration || clips.reduce((max, c) => Math.max(max, c.start + c.duration), 0);
+  if (totalDuration === 0) {
+    return <div className="p-8 text-center text-neutral-500">Run the pipeline to see the timeline.</div>;
+  }
+
+  return (
+    <div className="p-4 space-y-4">
+      {/* Timeline track */}
+      <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
+        <h3 className="text-sm font-medium text-neutral-300 mb-3">Timeline</h3>
+        {/* Time ruler */}
+        <div className="relative h-5 mb-1">
+          <div className="absolute inset-0 flex justify-between text-[10px] text-neutral-500">
+            {Array.from({ length: 6 }, (_, i) => (
+              <span key={i}>{fmtTime((totalDuration / 5) * i)}</span>
+            ))}
+          </div>
+        </div>
+        {/* Video/image track */}
+        <div className="relative h-16 bg-neutral-800/50 rounded-lg overflow-hidden">
+          {clips.map((clip) => {
+            const left = (clip.start / totalDuration) * 100;
+            const width = (clip.duration / totalDuration) * 100;
+            const color = segColor(clip.segmentIndex - 1);
+            return (
+              <div
+                key={clip.id}
+                onClick={() => onSelectClip(clip)}
+                className="absolute top-0 bottom-0 border-r border-neutral-900/50 cursor-pointer hover:brightness-125 transition-all flex items-center justify-center overflow-hidden"
+                style={{
+                  left: `${left}%`,
+                  width: `${width}%`,
+                  backgroundColor: color + '40',
+                  borderTop: `2px solid ${color}`,
+                }}
+              >
+                <div className="flex flex-col items-center px-1 min-w-0">
+                  {clip.isImage ? <FileImage size={12} className="text-neutral-300 shrink-0" /> : <FileVideo size={12} className="text-neutral-300 shrink-0" />}
+                  <span className="text-[9px] text-neutral-300 truncate">{clip.media.name}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {/* Audio track */}
+        <div className="relative h-8 bg-neutral-800/30 rounded-lg mt-1 flex items-center px-3">
+          <div className="text-xs text-neutral-400">Audio Track (Voiceover)</div>
+          <div className="flex-1 mx-3 h-2 bg-neutral-700 rounded-full" />
+          <span className="text-xs text-neutral-400">{fmtTime(totalDuration)}</span>
+        </div>
+        {/* Segment markers */}
+        <div className="relative h-4 mt-1">
+          {segments.map((seg) => (
+            <div
+              key={seg.id}
+              className="absolute top-0 bottom-0 w-0.5"
+              style={{ left: `${(seg.startTime / totalDuration) * 100}%`, backgroundColor: segColor(seg.index - 1) }}
+            >
+              <span className="text-[8px] text-neutral-400 absolute -left-2 top-0">{seg.index}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Clip details */}
+      {selectedClip && (
+        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
+          <h3 className="text-sm font-medium text-neutral-300 mb-3">Clip Details</h3>
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div><span className="text-neutral-500">File:</span> {selectedClip.media.name}</div>
+            <div><span className="text-neutral-500">Type:</span> {selectedClip.isImage ? 'Image' : 'Video'}</div>
+            <div><span className="text-neutral-500">Start:</span> {fmtTime(selectedClip.start)}</div>
+            <div><span className="text-neutral-500">Duration:</span> {fmtTime(selectedClip.duration)}</div>
+            <div><span className="text-neutral-500">Segment:</span> {selectedClip.segmentIndex}</div>
+            {selectedClip.coveringMissing && <div className="text-yellow-500">Covers missing media</div>}
+          </div>
+        </div>
+      )}
+
+      {/* Segment summary */}
+      <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
+        <h3 className="text-sm font-medium text-neutral-300 mb-3">Segments</h3>
+        <div className="space-y-1">
+          {segments.map((seg) => (
+            <div key={seg.id} className="flex items-center gap-2 text-xs">
+              <span className="w-6 font-mono" style={{ color: segColor(seg.index - 1) }}>{seg.index}</span>
+              <span className="text-neutral-400">{fmtTime(seg.startTime)} → {fmtTime(seg.endTime)}</span>
+              <span className="text-neutral-500 truncate flex-1">{seg.text.slice(0, 60)}...</span>
+              {seg.matchedMedia.length > 0 && <span className="text-neutral-400">{seg.matchedMedia.length} files</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Verification table */}
+      {clips.length > 0 && (
+        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
+          <h3 className="text-sm font-medium text-neutral-300 mb-3">Alignment Verification</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-neutral-500 border-b border-neutral-800">
+                  <th className="text-left py-1.5 px-2">Seg #</th>
+                  <th className="text-left py-1.5 px-2">Audio Start</th>
+                  <th className="text-left py-1.5 px-2">Audio End</th>
+                  <th className="text-left py-1.5 px-2">Spoken Dur</th>
+                  <th className="text-left py-1.5 px-2">Images Dur</th>
+                  <th className="text-left py-1.5 px-2">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {segments.map((seg) => {
+                  const v = verifySegmentFill(seg, clips);
+                  const spokenDur = seg.endTime - seg.startTime;
+                  const imagesDur = v.durationMicro / 1_000_000;
+                  const match = Math.abs(imagesDur - spokenDur) < 0.01;
+                  const isLowConf = seg.lowConfidence;
+                  return (
+                    <tr key={seg.id} className="border-b border-neutral-800/50">
+                      <td className="py-1.5 px-2 font-mono" style={{ color: segColor(seg.index - 1) }}>{seg.index}</td>
+                      <td className="py-1.5 px-2 text-neutral-400 font-mono">{fmtTime(seg.startTime)}</td>
+                      <td className="py-1.5 px-2 text-neutral-400 font-mono">{fmtTime(seg.endTime)}</td>
+                      <td className="py-1.5 px-2 text-neutral-400 font-mono">{spokenDur.toFixed(2)}s</td>
+                      <td className="py-1.5 px-2 text-neutral-400 font-mono">{imagesDur.toFixed(2)}s</td>
+                      <td className="py-1.5 px-2">
+                        {match ? (
+                          <span className={`px-2 py-0.5 rounded text-xs ${isLowConf ? 'bg-yellow-950/50 text-yellow-400' : 'bg-green-950/50 text-green-400'}`}>
+                            {isLowConf ? 'MATCH (low conf)' : 'MATCH'}
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded text-xs bg-red-950/50 text-red-400">
+                            MISMATCH ({(imagesDur - spokenDur).toFixed(2)}s)
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Preview Panel ────────────────────────────────────────────
+
+function PreviewPanel({ clips, audioDuration }: { clips: Clip[]; audioDuration: number }) {
+  const { currentProject: project } = useStore();
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const nextVideoRef = useRef<HTMLVideoElement | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [currentClip, setCurrentClip] = useState<Clip | null>(null);
+  const [buffering, setBuffering] = useState(false);
+  const objectUrls = useRef<Map<string, string>>(new Map());
+  const rafRef = useRef<number>(0);
+  const lastClipId = useRef<string>('');
+
+  // Multi-part audio state
+  const [partUrls, setPartUrls] = useState<string[]>([]);
+  const [currentPart, setCurrentPart] = useState(0);
+  const partDurations = project?.audioPartDurations || (project ? [project.audioDuration] : []);
+  const offsets = buildPartOffsets(partDurations);
+  const partBlobUrls = useRef<Map<string, string>>(new Map());
+
+  // Resolve object URLs for media
+  const getMediaUrl = useCallback(async (clip: Clip): Promise<string | null> => {
+    if (clip.media.objectUrl) return clip.media.objectUrl;
+    if (objectUrls.current.has(clip.media.id)) return objectUrls.current.get(clip.media.id)!;
+
+    let blob: Blob | null = null;
+    if (clip.media.blobId) {
+      const { getBlob } = await import('../lib/db');
+      blob = (await getBlob(clip.media.blobId)) || null;
+    } else if (project?.folders.mode === 'native' && clip.media.handlePath) {
+      const { verifyPermission } = await import('../lib/fs');
+      const { getHandle } = await import('../lib/db');
+      const folderId = clip.media.kind === 'video' ? project.folders.videosHandleId : project.folders.imagesHandleId;
+      if (folderId) {
+        const dirHandle = await getHandle(folderId) as FileSystemDirectoryHandle | undefined;
+        if (dirHandle && await verifyPermission(dirHandle)) {
+          const fileHandle = await dirHandle.getFileHandle(clip.media.handlePath);
+          blob = await fileHandle.getFile();
+        }
+      }
+    }
+    if (!blob) return null;
+    const url = URL.createObjectURL(blob);
+    objectUrls.current.set(clip.media.id, url);
+    return url;
+  }, [project]);
+
+  // Resolve ALL audio part URLs
+  useEffect(() => {
+    if (!project || partUrls.length > 0) return;
+    (async () => {
+      const { getBlob } = await import('../lib/db');
+      const { verifyPermission } = await import('../lib/fs');
+      const { getHandle } = await import('../lib/db');
+      const urls: string[] = [];
+      for (const part of project.folders.audioParts) {
+        let blob: Blob | null = null;
+        if (part.blobId) blob = (await getBlob(part.blobId)) || null;
+        else if (part.handleId) {
+          const handle = await getHandle(part.handleId) as FileSystemFileHandle | undefined;
+          if (handle && await verifyPermission(handle)) blob = await handle.getFile();
+        }
+        if (blob) {
+          const url = URL.createObjectURL(blob);
+          partBlobUrls.current.set(part.id, url);
+          urls.push(url);
+        }
+      }
+      setPartUrls(urls);
+    })();
+  }, [project, partUrls.length]);
+
+  // Map global time -> part index + local time
+  const globalToLocal = useCallback((globalTime: number): { part: number; local: number } => {
+    for (let i = 0; i < offsets.length; i++) {
+      const partEnd = offsets[i] + partDurations[i];
+      if (globalTime < partEnd || i === offsets.length - 1) {
+        return { part: i, local: globalTime - offsets[i] };
+      }
+    }
+    return { part: 0, local: globalTime };
+  }, [offsets, partDurations]);
+
+  // Find current clip at time
+  const findClipAt = useCallback((time: number): Clip | null => {
+    for (const clip of clips) {
+      if (time >= clip.start && time < clip.start + clip.duration) return clip;
+    }
+    return null;
+  }, [clips]);
+
+  // Switch audio to a specific part at a local time
+  const switchAudioPart = useCallback((partIdx: number, localTime: number) => {
+    if (!audioRef.current || !partUrls[partIdx]) return;
+    if (audioRef.current.src !== partUrls[partIdx]) {
+      audioRef.current.src = partUrls[partIdx];
+    }
+    if (Math.abs(audioRef.current.currentTime - localTime) > 0.05) {
+      audioRef.current.currentTime = localTime;
+    }
+    setCurrentPart(partIdx);
+  }, [partUrls]);
+
+  // Animation loop — gapless multi-part playback
+  useEffect(() => {
+    if (!playing) return;
+    const tick = () => {
+      if (audioRef.current) {
+        const localT = audioRef.current.currentTime;
+        const globalT = offsets[currentPart] + localT;
+        setCurrentTime(globalT);
+        const clip = findClipAt(globalT);
+        if (clip && clip.id !== lastClipId.current) {
+          lastClipId.current = clip.id;
+          setCurrentClip(clip);
+          swapClipSource(clip);
+        }
+        // resync video if drift
+        if (clip && !clip.isImage && videoRef.current) {
+          const expectedTime = (globalT - clip.start) + clip.sourceTrimStart;
+          if (Math.abs(videoRef.current.currentTime - expectedTime) > 0.3) {
+            videoRef.current.currentTime = expectedTime;
+          }
+        }
+        // Check if we've crossed a part boundary
+        const partEnd = partDurations[currentPart] || 0;
+        if (localT >= partEnd - 0.05 && currentPart < partUrls.length - 1) {
+          // Switch to next part
+          const nextPart = currentPart + 1;
+          const overflow = localT - partEnd;
+          switchAudioPart(nextPart, Math.max(0, overflow));
+          if (playing) audioRef.current?.play().catch(() => {});
+        }
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [playing, clips, findClipAt, offsets, currentPart, partDurations, partUrls.length, switchAudioPart]);
+
+  const swapClipSource = useCallback(async (clip: Clip) => {
+    const url = await getMediaUrl(clip);
+    if (!url) return;
+    if (clip.isImage) {
+      if (imgRef.current) {
+        imgRef.current.src = url;
+        imgRef.current.style.display = 'block';
+      }
+      if (videoRef.current) videoRef.current.style.display = 'none';
+    } else {
+      if (videoRef.current) {
+        videoRef.current.src = url;
+        videoRef.current.style.display = 'block';
+        const audioT = audioRef.current?.currentTime || 0;
+        const globalT = offsets[currentPart] + audioT;
+        videoRef.current.currentTime = (globalT - clip.start) + clip.sourceTrimStart;
+        videoRef.current.play().catch(() => {});
+      }
+      if (imgRef.current) imgRef.current.style.display = 'none';
+    }
+  }, [getMediaUrl, offsets, currentPart]);
+
+  const handlePlayPause = () => {
+    if (!audioRef.current) return;
+    if (playing) {
+      audioRef.current.pause();
+      videoRef.current?.pause();
+      setPlaying(false);
+    } else {
+      // Ensure correct part is loaded for current time
+      const { part, local } = globalToLocal(currentTime);
+      switchAudioPart(part, local);
+      audioRef.current.play().catch(() => {});
+      setPlaying(true);
+    }
+  };
+
+  const handleSeek = (time: number) => {
+    const { part, local } = globalToLocal(time);
+    switchAudioPart(part, local);
+    setCurrentTime(time);
+    const clip = findClipAt(time);
+    if (clip && clip.id !== lastClipId.current) {
+      lastClipId.current = clip.id;
+      setCurrentClip(clip);
+      swapClipSource(clip);
+    }
+  };
+
+  // Preload next clip
+  useEffect(() => {
+    if (!currentClip) return;
+    const nextIdx = clips.findIndex(c => c.id === currentClip.id) + 1;
+    if (nextIdx < clips.length && !clips[nextIdx].isImage && nextVideoRef.current) {
+      getMediaUrl(clips[nextIdx]).then(url => {
+        if (url && nextVideoRef.current) nextVideoRef.current.src = url;
+      });
+    }
+  }, [currentClip, clips, getMediaUrl]);
+
+  useEffect(() => {
+    return () => {
+      objectUrls.current.forEach(url => URL.revokeObjectURL(url));
+      objectUrls.current.clear();
+      partBlobUrls.current.forEach(url => URL.revokeObjectURL(url));
+      partBlobUrls.current.clear();
+    };
+  }, []);
+
+  if (clips.length === 0) {
+    return <div className="p-8 text-center text-neutral-500">Run the pipeline to see the preview.</div>;
+  }
+
+  // Part summary
+  const partSummary = partDurations.length > 0
+    ? partDurations.map((d, i) => `Part ${i + 1}: ${fmtTime(d)}`).join(' + ') + ` = Total ${fmtTime(audioDuration)}`
+    : '';
+
+  return (
+    <div className="p-4 space-y-4">
+      <div className="bg-black rounded-xl overflow-hidden relative" style={{ aspectRatio: '16/9' }}>
+        <video ref={videoRef} className="w-full h-full object-contain" muted playsInline preload="auto" style={{ display: 'none' }} />
+        <video ref={nextVideoRef} className="hidden" muted playsInline preload="auto" />
+        <img ref={imgRef} className="w-full h-full object-contain" style={{ display: 'none' }} alt="" />
+        {buffering && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <Loader2 className="animate-spin text-white" size={32} />
+          </div>
+        )}
+        {partUrls.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center text-neutral-500">
+            Loading audio...
+          </div>
+        )}
+      </div>
+
+      {/* Part summary */}
+      {partSummary && (
+        <div className="bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-xs text-neutral-300 font-mono">
+          {partSummary}
+        </div>
+      )}
+
+      {/* Transport controls */}
+      <div className="flex items-center gap-3 bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3">
+        <button onClick={handlePlayPause} className="text-white hover:text-blue-400 transition-colors">
+          {playing ? <Pause size={20} /> : <Play size={20} />}
+        </button>
+        <span className="text-xs text-neutral-400 font-mono">{fmtTime(currentTime)}</span>
+        <input
+          type="range"
+          min={0}
+          max={audioDuration || 100}
+          step={0.1}
+          value={currentTime}
+          onChange={(e) => handleSeek(parseFloat(e.target.value))}
+          className="flex-1 accent-blue-500"
+        />
+        <span className="text-xs text-neutral-400 font-mono">{fmtTime(audioDuration)}</span>
+      </div>
+
+      <audio ref={audioRef} src={partUrls[0] || undefined} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => {
+        // Auto-advance to next part if available
+        if (currentPart < partUrls.length - 1) {
+          const nextPart = currentPart + 1;
+          switchAudioPart(nextPart, 0);
+          audioRef.current?.play().catch(() => {});
+        } else {
+          setPlaying(false);
+        }
+      }} />
+
+      {/* Current clip info */}
+      {currentClip && (
+        <div className="text-xs text-neutral-400">
+          Playing: {currentClip.media.name} (Segment {currentClip.segmentIndex}) — Part {currentPart + 1}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Export Panel ────────────────────────────────────────────
+
+function ExportPanel() {
+  const { currentProject: project, exportDraft, exportFallback, importTemplate, templates, removeTemplate, settings, saveSettings, addLog, simulateTestExport } = useStore();
+  const [draftsRoot, setDraftsRoot] = useState('');
+  const [username, setUsername] = useState('');
+  const [transMode, setTransMode] = useState<'online' | 'offline'>('offline');
+  const [groqKey, setGroqKey] = useState('');
+  const [imageOffset, setImageOffset] = useState(0);
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const [showInstructions, setShowInstructions] = useState(false);
+  const [report, setReport] = useState<ValidationReport | null>(null);
+  const [importing, setImporting] = useState(false);
+
+  useEffect(() => {
+    if (settings) {
+      setDraftsRoot(settings.draftsRootPath || '');
+      setUsername(settings.username || '');
+      setTransMode(settings.transcriptionMode || 'offline');
+      setGroqKey(settings.groqApiKey || '');
+      setImageOffset(settings.imageOffsetSec || 0);
+    }
+  }, [settings]);
+
+  // Auto-select first template
+  useEffect(() => {
+    if (templates.length > 0 && !selectedTemplateId) {
+      setSelectedTemplateId(templates[0].id);
+    }
+  }, [templates, selectedTemplateId]);
+
+  if (!project) return null;
+
+  const selectedTemplate = templates.find(t => t.id === selectedTemplateId) || null;
+  const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'Untitled';
+  const previewFoldPath = draftsRoot ? `${draftsRoot}/${safeName}` : '';
+
+  const handleImportTemplate = async () => {
+    setImporting(true);
+    try {
+      await importTemplate();
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    await saveSettings({
+      draftsRootPath: draftsRoot,
+      username,
+      transcriptionMode: transMode,
+      groqApiKey: groqKey.trim(),
+      imageOffsetSec: imageOffset,
+    });
+  };
+
+  const handleExport = async () => {
+    if (!selectedTemplate) {
+      addLog('Cannot export: no template imported. Import a CapCut template draft first.', 'error');
+      return;
+    }
+    if (!draftsRoot.trim()) {
+      addLog('Cannot export: drafts root path is empty. Please set your CapCut drafts path first.', 'error');
+      return;
+    }
+    setExporting(true);
+    setReport(null);
+    try {
+      const result = await exportDraft(draftsRoot.trim(), selectedTemplate);
+      setReport(result.report);
+      const url = URL.createObjectURL(result.blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${safeName}_capcut.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setShowInstructions(true);
+      if (result.report.passed) {
+        addLog('Exported CapCut draft ZIP — validator PASSED');
+      } else {
+        addLog('Exported CapCut draft ZIP — validator FAILED (check report)', 'warn');
+      }
+    } catch (e: any) {
+      addLog(`Export error: ${e.message}`, 'error');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleFallbackExport = async () => {
+    setExporting(true);
+    try {
+      const blob = await exportFallback();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${safeName}_cutsheet.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      addLog('Exported SRT/CSV cut-sheet');
+    } catch (e: any) {
+      addLog(`Export error: ${e.message}`, 'error');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className="p-4 space-y-4 max-w-2xl">
+      {/* Template import section */}
+      <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 space-y-3">
+        <h3 className="text-sm font-medium text-neutral-300 flex items-center gap-2">
+          <Upload size={16} /> CapCut Template (Recommended)
+        </h3>
+        <p className="text-xs text-neutral-500">
+          For guaranteed compatibility with your CapCut version, import a template draft created by your own CapCut.
+          Open CapCut Desktop, create a new empty project (add one image, one video, one audio), close CapCut, then select that draft's folder.
+        </p>
+        <button
+          onClick={handleImportTemplate}
+          disabled={importing}
+          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-700 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+        >
+          {importing ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
+          Import CapCut Template
+        </button>
+
+        {templates.length > 0 && (
+          <div className="space-y-2">
+            <label className="block text-xs text-neutral-400">Active template:</label>
+            <div className="flex items-center gap-2">
+              <select
+                value={selectedTemplateId}
+                onChange={(e) => setSelectedTemplateId(e.target.value)}
+                className="flex-1 bg-neutral-800 border border-neutral-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+              >
+                {templates.map(t => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => { removeTemplate(selectedTemplateId); setSelectedTemplateId(''); }}
+                className="text-red-400 hover:text-red-300 p-2"
+                title="Delete template"
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+            {selectedTemplate && (
+              <div className="text-xs text-green-400 flex items-center gap-1">
+                <Check size={12} /> Detected drafts root: {selectedTemplate.detectedDraftsRoot || '(not found)'}
+              </div>
+            )}
+          </div>
+        )}
+
+        {!selectedTemplate && (
+          <div className="flex items-start gap-2 bg-red-950/30 border border-red-800 rounded-lg px-3 py-2 text-xs text-red-200">
+            <AlertOctagon size={14} className="mt-0.5 shrink-0" />
+            <span><strong>Export blocked:</strong> No template imported. You must import a CapCut template draft (created by your own CapCut) before exporting. Click the button above to import one.</span>
+          </div>
+        )}
+      </div>
+
+      {/* Transcription settings */}
+      <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 space-y-3">
+        <h3 className="text-sm font-medium text-neutral-300 flex items-center gap-2">
+          <Settings size={16} /> Transcription
+        </h3>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setTransMode('online')}
+            className={`flex-1 rounded-lg px-3 py-2 text-sm border transition-colors ${
+              transMode === 'online'
+                ? 'bg-blue-600 border-blue-500 text-white'
+                : 'bg-neutral-800 border-neutral-600 text-neutral-300 hover:bg-neutral-700'
+            }`}
+          >
+            Online — Groq (fast)
+          </button>
+          <button
+            onClick={() => setTransMode('offline')}
+            className={`flex-1 rounded-lg px-3 py-2 text-sm border transition-colors ${
+              transMode === 'offline'
+                ? 'bg-blue-600 border-blue-500 text-white'
+                : 'bg-neutral-800 border-neutral-600 text-neutral-300 hover:bg-neutral-700'
+            }`}
+          >
+            Offline — free &amp; unlimited (on your PC)
+          </button>
+        </div>
+        {transMode === 'offline' && (
+          <p className="text-xs text-neutral-500">
+            Runs a speech model on your own computer — no key, no limits, nothing uploaded.
+            Uses the bundled fast engine; a 30-minute recording takes a couple of minutes.
+          </p>
+        )}
+        <div className="pt-1">
+          <label className="block text-sm text-neutral-300 mb-1.5">Image timing offset (seconds)</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              step="0.5"
+              value={imageOffset}
+              onChange={(e) => setImageOffset(parseFloat(e.target.value) || 0)}
+              className="w-28 bg-neutral-800 border border-neutral-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+            />
+            <span className="text-xs text-neutral-500">seconds</span>
+          </div>
+          <p className="text-xs text-neutral-500 mt-1">
+            If images change <strong>too late</strong>, increase this (e.g. <strong>6</strong>) to move every image earlier.
+            Negative moves them later. Then click <strong>Save</strong> and <strong>Process</strong> again.
+          </p>
+        </div>
+        {transMode === 'online' && (
+          <div className="space-y-2">
+            <label className="block text-sm text-neutral-300">Groq API key</label>
+            <input
+              type="password"
+              value={groqKey}
+              onChange={(e) => setGroqKey(e.target.value)}
+              placeholder="gsk_…"
+              className="w-full bg-neutral-800 border border-neutral-600 rounded-lg px-3 py-2 text-sm text-white placeholder-neutral-500 focus:outline-none focus:border-blue-500 font-mono text-xs"
+            />
+            <p className="text-xs text-neutral-500">
+              Get a free key at <span className="text-blue-300">console.groq.com/keys</span> (no card).
+              Stored only on your PC. Fast &amp; accurate; audio is sent to Groq for transcription.
+              Click <strong>Save</strong> below, then press <strong>Process</strong>.
+            </p>
+          </div>
+        )}
+        <button
+          onClick={handleSaveSettings}
+          className="text-xs bg-neutral-700 hover:bg-neutral-600 text-white rounded-lg px-3 py-1.5 transition-colors"
+        >
+          Save
+        </button>
+      </div>
+
+      {/* Path settings section */}
+      <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 space-y-3">
+        <h3 className="text-sm font-medium text-neutral-300 flex items-center gap-2">
+          <Settings size={16} /> Drafts Root Path
+        </h3>
+        <p className="text-xs text-neutral-500">
+          This is the CapCut drafts folder on your PC. It's auto-detected from your imported template.
+          If no template, enter your Windows username to build the path, or paste the full path manually.
+        </p>
+
+        <div>
+          <label className="block text-sm text-neutral-300 mb-1.5">Windows Username (optional)</label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => {
+              setUsername(e.target.value);
+              if (e.target.value.trim()) {
+                setDraftsRoot(`C:/Users/${e.target.value.trim()}/AppData/Local/CapCut/User Data/Projects/com.lveditor.draft`);
+              }
+            }}
+            placeholder="e.g. johnsmith"
+            className="w-full bg-neutral-800 border border-neutral-600 rounded-lg px-3 py-2 text-sm text-white placeholder-neutral-500 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm text-neutral-300 mb-1.5">Drafts Root Path</label>
+          <input
+            type="text"
+            value={draftsRoot}
+            onChange={(e) => setDraftsRoot(e.target.value)}
+            placeholder="C:/Users/<USERNAME>/AppData/Local/CapCut/User Data/Projects/com.lveditor.draft"
+            className="w-full bg-neutral-800 border border-neutral-600 rounded-lg px-3 py-2 text-sm text-white placeholder-neutral-500 focus:outline-none focus:border-blue-500 font-mono text-xs"
+          />
+        </div>
+
+        {previewFoldPath && (
+          <div className="bg-neutral-800/50 border border-neutral-700 rounded-lg px-3 py-2">
+            <p className="text-xs text-neutral-400 mb-1">Your project will be exported to:</p>
+            <code className="text-xs text-blue-300 font-mono break-all">{previewFoldPath}</code>
+          </div>
+        )}
+
+        <button
+          onClick={handleSaveSettings}
+          className="text-xs bg-neutral-700 hover:bg-neutral-600 text-white rounded-lg px-3 py-1.5 transition-colors"
+        >
+          Save settings
+        </button>
+      </div>
+
+      {/* Export buttons */}
+      <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 space-y-3">
+        <div className="flex gap-3">
+          <button
+            onClick={handleExport}
+            disabled={!draftsRoot.trim() || exporting || !project.processed || !selectedTemplate}
+            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+          >
+            {exporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+            Export CapCut Draft
+          </button>
+          <button
+            onClick={handleFallbackExport}
+            disabled={exporting || !project.processed}
+            className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors border border-neutral-600"
+          >
+            <Download size={16} />
+            SRT/CSV Cut-Sheet
+          </button>
+          <button
+            onClick={() => simulateTestExport(draftsRoot.trim() || 'C:/Users/test/AppData/Local/CapCut/User Data/Projects/com.lveditor.draft')}
+            disabled={exporting || !project.processed}
+            className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors border border-neutral-600"
+          >
+            <Terminal size={16} />
+            Run Test Simulation
+          </button>
+        </div>
+        {!project.processed && (
+          <p className="text-xs text-yellow-500">Run the Process pipeline first before exporting.</p>
+        )}
+        {!draftsRoot.trim() && (
+          <p className="text-xs text-red-400">Set your drafts root path above before exporting.</p>
+        )}
+        {!selectedTemplate && (
+          <p className="text-xs text-red-400">Import a CapCut template first — export is blocked without one.</p>
+        )}
+      </div>
+
+      {/* Validator report */}
+      {report && (
+        <div className={`bg-neutral-900 border rounded-xl p-5 space-y-3 ${report.passed ? 'border-green-700' : 'border-red-700'}`}>
+          <h3 className="text-sm font-medium flex items-center gap-2">
+            {report.passed ? (
+              <><CheckCircle2 size={16} className="text-green-400" /> <span className="text-green-400">Validator: PASSED</span></>
+            ) : (
+              <><AlertOctagon size={16} className="text-red-400" /> <span className="text-red-400">Validator: FAILED</span></>
+            )}
+            <span className="text-xs text-neutral-500">({report.checks.filter(c => c.pass).length}/{report.checks.length} checks)</span>
+          </h3>
+          <div className="space-y-1">
+            {report.checks.map((check, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs">
+                {check.pass ? (
+                  <Check size={14} className="text-green-400 mt-0.5 shrink-0" />
+                ) : (
+                  <X size={14} className="text-red-400 mt-0.5 shrink-0" />
+                )}
+                <span className="text-neutral-300">{check.name}</span>
+                <span className="text-neutral-500 ml-auto text-right">{check.detail}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Instructions */}
+      {showInstructions && (
+        <div className="bg-blue-950/30 border border-blue-800 rounded-xl p-5 space-y-3">
+          <h4 className="text-sm font-medium text-blue-200 flex items-center gap-2">
+            <AlertCircle size={16} /> How to import into CapCut
+          </h4>
+          <ol className="space-y-2 text-sm text-neutral-300 list-decimal list-inside">
+            <li><strong>Close CapCut completely</strong> — check your system tray to make sure it's not running in the background.</li>
+            <li>Extract the ZIP file directly into your CapCut drafts folder:
+              <code className="block bg-neutral-800 rounded px-2 py-1 mt-1 text-xs text-blue-300 font-mono break-all">
+                {draftsRoot || 'C:/Users/<USERNAME>/AppData/Local/CapCut/User Data/Projects/com.lveditor.draft/'}
+              </code>
+            </li>
+            <li>Verify the structure shows:
+              <code className="block bg-neutral-800 rounded px-2 py-1 mt-1 text-xs text-neutral-400 font-mono">
+                {safeName}/<br />
+                ├── draft_content.json<br />
+                ├── draft_meta_info.json<br />
+                └── Resources/
+              </code>
+              <span className="text-yellow-500 text-xs">Make sure there's no nested duplicate folder.</span>
+            </li>
+            <li>Open CapCut — the project "{safeName}" will appear in your drafts list.</li>
+            <li>Keep it on your local C: drive — never OneDrive-synced folders, USB, or network drives.</li>
+          </ol>
+          <button onClick={() => setShowInstructions(false)} className="text-xs text-blue-400 hover:text-blue-300">
+            Dismiss
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Log Panel ────────────────────────────────────────────────
+
+function LogPanel() {
+  const { logs, clearLogs } = useStore();
+  const [expanded, setExpanded] = useState(false);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
+
+  if (logs.length === 0) return null;
+
+  return (
+    <div className="border-t border-neutral-800 bg-neutral-900">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center justify-between w-full px-4 py-2 text-xs text-neutral-400 hover:text-neutral-200 transition-colors"
+      >
+        <span className="flex items-center gap-2">
+          <Terminal size={14} /> Log ({logs.length})
+        </span>
+        <span className="flex items-center gap-2">
+          {expanded && <button onClick={(e) => { e.stopPropagation(); clearLogs(); }} className="hover:text-white">Clear</button>}
+          {expanded ? '▼' : '▲'}
+        </span>
+      </button>
+      {expanded && (
+        <div className="max-h-32 overflow-y-auto px-4 pb-2 space-y-0.5">
+          {logs.map((log, i) => (
+            <div key={i} className={`text-xs font-mono ${
+              log.level === 'error' ? 'text-red-400' :
+              log.level === 'warn' ? 'text-yellow-400' : 'text-neutral-400'
+            }`}>
+              [{new Date(log.time).toLocaleTimeString()}] {log.message}
+            </div>
+          ))}
+          <div ref={logEndRef} />
+        </div>
+      )}
+    </div>
+  );
+}

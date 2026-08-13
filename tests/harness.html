@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Resolve the app's relative model/ort paths against the site root, the
+         same way the real app's root index.html does. -->
+    <base href="/" />
+    <link rel="icon" href="data:," />
+    <title>AutoCapcut Test Harness</title>
+    <style>
+      body { font-family: monospace; background: #0a0a0a; color: #eee; padding: 16px; }
+      .pass { color: #4ade80; }
+      .fail { color: #f87171; }
+    </style>
+  </head>
+  <body>
+    <h1>AutoCapcut Test Harness</h1>
+    <div id="results"></div>
+    <script type="module" src="/tests/run-tests.ts"></script>
+  </body>
+</html>
