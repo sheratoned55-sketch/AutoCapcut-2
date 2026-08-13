@@ -1,0 +1,112 @@
+name: Build Windows App
+
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Download the Whisper model so it gets bundled into the app (dist/models),
+      # making the in-browser (fallback) transcription work fully offline.
+      - name: Fetch Whisper model
+        shell: bash
+        run: bash tests/fetch-model.sh
+
+      # Build the fast native offline engine (whisper.cpp) and download its model.
+      # A self-contained whisper-cli.exe + ggml-tiny.en model are bundled as app
+      # resources. If this step fails the app still ships (it falls back to the
+      # in-browser engine), so it must not break the release.
+      - name: Build native whisper.cpp engine
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp "$RUNNER_TEMP/whispercpp"
+          cmake -S "$RUNNER_TEMP/whispercpp" -B "$RUNNER_TEMP/whispercpp/build" \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build "$RUNNER_TEMP/whispercpp/build" --config Release --target whisper-cli -j
+          mkdir -p native
+          cp "$RUNNER_TEMP/whispercpp/build/bin/Release/whisper-cli.exe" native/whisper-cli.exe \
+            || cp "$RUNNER_TEMP/whispercpp/build/bin/whisper-cli.exe" native/whisper-cli.exe
+          curl -sSL -o native/ggml-tiny.en.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+          ls -la native/
+
+      - name: Build app
+        run: npm run build
+
+      - name: Package Windows installer
+        run: npx electron-builder --win --publish never
+
+      # Only upload to Actions artifacts for branch builds (for testing). On main
+      # we publish straight to the Releases page (separate storage), so we skip
+      # this to avoid the Actions artifact storage quota — and never let it fail
+      # the job (which would skip the release publish).
+      - name: Upload installer artifact
+        if: github.ref != 'refs/heads/main'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoCapcut-Windows
+          path: |
+            release/*.exe
+          if-no-files-found: warn
+          retention-days: 1
+
+      # Remove the previous 'latest' release first so old version files don't
+      # pile up next to the new ones on the Releases page.
+      - name: Clear previous 'latest' release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: gh release delete latest --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish release (main branch only)
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: AutoCapcut for Windows v1.6.0 (latest)
+          body: |
+            **v1.6.0 — image durations now match the audio, word for word.**
+
+            - **Every image lasts exactly as long as its part is spoken:** the app no longer times images by guessing from just the first/last words of each segment. It now aligns your **entire script against the audio's live subtitle timing, word by word**, and reads each image's start and length straight from where those words are actually said. So if one part is spoken slowly and the next quickly, each image stretches or shrinks to match — no more images that are too long or too short, and no more manual adjusting. This is all inside AutoCapcut.
+            - **Handles repeated phrases and transcription slips:** because it matches the whole script as one sequence (not each segment on its own), a phrase that repeats later in your script can no longer pull an image to the wrong spot, and a few mis-heard words don't throw the timing off.
+            - **Latest CapCut format supported:** exports reproduce CapCut's modern draft structure (the timeline is written into `Timelines/…` where the newest CapCut reads it, not just the old root file), so drafts open correctly in the latest CapCut. Re-import your latest CapCut template once, then export.
+            - **Fast offline engine (default):** transcription runs a native speech model (whisper.cpp) on your own PC using all your CPU cores — a 30-minute recording finishes in a couple of minutes. No key, no limits, nothing uploaded.
+            - **Optional online mode (Groq):** in **Export → Transcription**, switch to **Online — Groq** and paste a free key (console.groq.com/keys) for even faster cloud transcription.
+            - **Skip transcription button:** click it any time to instantly space your script evenly across the audio and continue — you always get a result.
+            - **Fixed the "User activation is required" crash:** folder permissions are now requested when you click Process, so scanning your image/video folders no longer fails mid-run.
+            - **Fix late images (Segments tab):** tick the images that appear late, set how many seconds (e.g. 6), and click **Move selected earlier** — only those images shift earlier and the ones in the way adjust automatically, gap-free. There's also a global **Image timing offset** in Export → Transcription.
+            - **Never hangs & delete frees disk:** stalled steps time out to even timing; deleting a project reclaims its disk space.
+
+            **How to know you have this build:** the app shows **`v1.6.0`** in the top-left corner.
+
+            **Easiest, no-install option (recommended):** download **AutoCapcut-Portable-1.6.0.exe**, put it on your Desktop, and double-click it. Nothing to install or uninstall — it just runs the fixed build.
+
+            Or, to install: download **AutoCapcut-Setup-1.6.0.exe**. If an old AutoCapcut is installed, uninstall it first (Start menu → AutoCapcut → Uninstall), then run the setup.
+          files: release/*.exe
+          prerelease: false
