@@ -130,6 +130,9 @@ function createWindow() {
       nodeIntegration: false,
       spellcheck: false,
       preload: path.join(__dirname, 'preload.cjs'),
+      // Keep timers/rendering running at full speed when the window is
+      // minimized or in the background, so a video export never stalls.
+      backgroundThrottling: false,
     },
   });
 

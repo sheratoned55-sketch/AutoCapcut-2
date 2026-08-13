@@ -73,7 +73,7 @@ jobs:
           path: |
             release/*.exe
           if-no-files-found: warn
-          retention-days: 1
+          retention-days: 30
 
       # Remove the previous 'latest' release first so old version files don't
       # pile up next to the new ones on the Releases page.

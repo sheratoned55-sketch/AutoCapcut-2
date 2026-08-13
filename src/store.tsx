@@ -8,6 +8,15 @@ import { transcribeNative, nativeAvailable } from './lib/native';
 import { parseMediaName, naturalSort, buildTimeline } from './lib/matching';
 import { exportCapCutDraft, exportSrtCsv, importTemplateFromFolder, simulateExportWithMockTemplate, ValidationReport } from './lib/export';
 import { exportVideo as renderVideoToMp4, DrawSource, CancelSignal } from './lib/render';
+import { catalogFor } from './lib/animations';
+
+export interface VideoExportState {
+  active: boolean;
+  progress: number;
+  message: string;
+  error?: string;
+  done?: boolean;
+}
 
 interface LogEntry {
   time: number;
@@ -40,13 +49,22 @@ interface StoreContextValue {
   setClipAnimation: (mediaId: string, slot: AnimCategory, anim: ClipAnim | null) => Promise<void>;
   applyAnimation: (slot: AnimCategory, anim: ClipAnim, mediaIds?: string[]) => Promise<void>;
   applyAnimationSequence: (items: { slot: AnimCategory; anim: ClipAnim }[], mediaIds?: string[]) => Promise<void>;
+  applyRandomAnimation: (slot: AnimCategory, base: { duration: number; fullDuration: boolean }, mediaIds?: string[]) => Promise<void>;
   clearClipAnimations: (mediaId: string) => Promise<void>;
   clearAllAnimations: () => Promise<void>;
   toggleFavoriteAnimation: (animId: string) => Promise<void>;
+  setAnimationSpeed: (animId: string, speed: number) => Promise<void>;
+  adjustClipSpeed: (mediaId: string, factor: number) => Promise<void>;
+  resetClipSpeed: (mediaId: string) => Promise<void>;
   // ─── Transitions ───
   setTransition: (mediaId: string, trans: ClipTransition | null) => Promise<void>;
   applyTransition: (trans: ClipTransition, mediaIds?: string[]) => Promise<void>;
   clearAllTransitions: () => Promise<void>;
+  setTransitionDuration: (transId: string, duration: number) => Promise<void>;
+  // ─── Video export (lifted so it survives tab switches) ───
+  videoExportState: VideoExportState | null;
+  startVideoExport: (settings: VideoExportSettings) => Promise<void>;
+  cancelVideoExport: () => void;
   exportVideo: (settings: VideoExportSettings, onProgress: (f: number, m: string) => void, signal: CancelSignal) => Promise<Blob>;
   importTemplate: () => Promise<CapCutTemplate | null>;
   templates: CapCutTemplate[];
@@ -105,6 +123,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [whisperModelProgress, setWhisperModelProgress] = useState(0);
   const [templates, setTemplates] = useState<CapCutTemplate[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [videoExportState, setVideoExportState] = useState<VideoExportState | null>(null);
+  const exportCancelRef = useRef<CancelSignal>({ cancelled: false });
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Lets the user bail out of a slow transcription and fall back to even timing.
   const cancelTranscribeRef = useRef(false);
@@ -893,9 +913,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ? mediaIds
         : Array.from(new Set(prev.clips.filter((c) => c.isImage).map((c) => c.media.id)));
       const map: Record<string, ClipAnimationConfig> = { ...(prev.clipAnimations || {}) };
+      const speed = anim.speed ?? settings?.animationSpeeds?.[anim.animId] ?? 1;
       for (const id of targets) {
         const cfg: ClipAnimationConfig = { ...(map[id] || {}) };
-        cfg[slot] = { ...anim };
+        cfg[slot] = { ...anim, speed };
         if (slot === 'combo') { delete cfg.in; delete cfg.out; }
         else delete cfg.combo;
         map[id] = cfg;
@@ -905,7 +926,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return next;
     });
     addLog(`Applied ${slot} animation "${anim.animId}" to ${mediaIds?.length ? mediaIds.length + ' selected' : 'all'} image(s).`);
-  }, [persist, addLog]);
+  }, [persist, addLog, settings]);
 
   const clearClipAnimations = useCallback(async (mediaId: string) => {
     setCurrentProject((prev) => {
@@ -943,8 +964,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const map: Record<string, ClipAnimationConfig> = { ...(prev.clipAnimations || {}) };
       order.forEach((id, i) => {
         const { slot, anim } = items[i % items.length];
+        const speed = anim.speed ?? settings?.animationSpeeds?.[anim.animId] ?? 1;
         const cfg: ClipAnimationConfig = { ...(map[id] || {}) };
-        cfg[slot] = { ...anim };
+        cfg[slot] = { ...anim, speed };
         if (slot === 'combo') { delete cfg.in; delete cfg.out; }
         else delete cfg.combo;
         map[id] = cfg;
@@ -954,7 +976,71 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return next;
     });
     addLog(`Applied a sequence of ${items.length} animation(s) across ${mediaIds?.length ? mediaIds.length + ' selected' : 'all'} image(s).`);
-  }, [persist, addLog]);
+  }, [persist, addLog, settings]);
+
+  // Give each target image a RANDOM animation from the slot's catalog.
+  const applyRandomAnimation = useCallback(async (slot: AnimCategory, base: { duration: number; fullDuration: boolean }, mediaIds?: string[]) => {
+    const catalog = catalogFor(slot);
+    if (catalog.length === 0) return;
+    setCurrentProject((prev) => {
+      if (!prev) return prev;
+      const targets = mediaIds && mediaIds.length > 0
+        ? mediaIds
+        : Array.from(new Set(prev.clips.filter((c) => c.isImage).map((c) => c.media.id)));
+      const map: Record<string, ClipAnimationConfig> = { ...(prev.clipAnimations || {}) };
+      for (const id of targets) {
+        const pick = catalog[Math.floor(Math.random() * catalog.length)];
+        const speed = settings?.animationSpeeds?.[pick.id] ?? 1;
+        const cfg: ClipAnimationConfig = { ...(map[id] || {}) };
+        cfg[slot] = { animId: pick.id, duration: base.duration, fullDuration: base.fullDuration, speed };
+        if (slot === 'combo') { delete cfg.in; delete cfg.out; }
+        else delete cfg.combo;
+        map[id] = cfg;
+      }
+      const next = { ...prev, clipAnimations: map, updatedAt: Date.now() };
+      persist(next);
+      return next;
+    });
+    addLog(`Applied random ${slot} animations to ${mediaIds?.length ? mediaIds.length + ' selected' : 'all'} image(s).`);
+  }, [persist, addLog, settings]);
+
+  // Remember an animation's speed globally so it carries into new projects.
+  const setAnimationSpeed = useCallback(async (animId: string, speed: number) => {
+    const base = settings || { draftsRootPath: '', username: '' };
+    const next = { ...base, animationSpeeds: { ...(base.animationSpeeds || {}), [animId]: speed } };
+    await setSetting('appSettings', next);
+    setSettings(next);
+  }, [settings]);
+
+  // Per-image speed: multiply the speed of every animation slot on this image.
+  const adjustClipSpeed = useCallback(async (mediaId: string, factor: number) => {
+    setCurrentProject((prev) => {
+      if (!prev) return prev;
+      const map = { ...(prev.clipAnimations || {}) };
+      const cfg = map[mediaId];
+      if (!cfg) return prev;
+      const clampSpeed = (s: number) => Math.max(0.1, Math.min(5, s));
+      const scaled = (a?: ClipAnim) => a ? { ...a, speed: clampSpeed((a.speed || 1) * factor) } : a;
+      map[mediaId] = { in: scaled(cfg.in), out: scaled(cfg.out), combo: scaled(cfg.combo) };
+      const next = { ...prev, clipAnimations: map, updatedAt: Date.now() };
+      persist(next);
+      return next;
+    });
+  }, [persist]);
+
+  const resetClipSpeed = useCallback(async (mediaId: string) => {
+    setCurrentProject((prev) => {
+      if (!prev) return prev;
+      const map = { ...(prev.clipAnimations || {}) };
+      const cfg = map[mediaId];
+      if (!cfg) return prev;
+      const reset = (a?: ClipAnim) => a ? { ...a, speed: 1 } : a;
+      map[mediaId] = { in: reset(cfg.in), out: reset(cfg.out), combo: reset(cfg.combo) };
+      const next = { ...prev, clipAnimations: map, updatedAt: Date.now() };
+      persist(next);
+      return next;
+    });
+  }, [persist]);
 
   const toggleFavoriteAnimation = useCallback(async (animId: string) => {
     const base = settings || { draftsRootPath: '', username: '' };
@@ -1002,6 +1088,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     await updateProject({ transitions: {} });
     addLog('Cleared all transitions.');
   }, [updateProject, addLog]);
+
+  // Remember a transition's duration globally so it carries into new projects.
+  const setTransitionDuration = useCallback(async (transId: string, duration: number) => {
+    const base = settings || { draftsRootPath: '', username: '' };
+    const next = { ...base, transitionDurations: { ...(base.transitionDurations || {}), [transId]: duration } };
+    await setSetting('appSettings', next);
+    setSettings(next);
+  }, [settings]);
 
   // ─── Standalone MP4 export ───────────────────────────────
   const exportVideo = useCallback(async (
@@ -1081,6 +1175,44 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       imageBitmaps.forEach((b) => { if ((b as any).close) (b as any).close(); });
     }
   }, [currentProject, collectMediaBlobs, resolveAllAudioBlobs, addLog]);
+
+  // Lifted export runner: lives in the store so it keeps running when the user
+  // switches editor tabs, and drives a global progress overlay.
+  const cancelVideoExport = useCallback(() => {
+    exportCancelRef.current.cancelled = true;
+  }, []);
+
+  const startVideoExport = useCallback(async (settings: VideoExportSettings) => {
+    if (!currentProject) return;
+    if (videoExportState?.active) return; // already exporting
+    await updateProject({ videoExport: settings });
+    const safeName = currentProject.name.replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'video';
+    exportCancelRef.current = { cancelled: false };
+    setVideoExportState({ active: true, progress: 0, message: 'Starting…' });
+    try {
+      const blob = await exportVideo(
+        settings,
+        (f, m) => setVideoExportState({ active: true, progress: f, message: m }),
+        exportCancelRef.current,
+      );
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${safeName}_${settings.resolution}_${settings.fps}fps.mp4`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setVideoExportState({ active: false, progress: 1, message: `Saved ${settings.resolution} MP4`, done: true });
+      setTimeout(() => setVideoExportState((s) => (s && s.done ? null : s)), 5000);
+    } catch (e: any) {
+      if (e.message === 'Export cancelled') {
+        setVideoExportState(null);
+      } else {
+        addLog(`Video export failed: ${e.message}`, 'error');
+        setVideoExportState({ active: false, progress: 0, message: '', error: e.message });
+        setTimeout(() => setVideoExportState((s) => (s && s.error ? null : s)), 8000);
+      }
+    }
+  }, [currentProject, videoExportState, updateProject, exportVideo, addLog]);
 
   const loadTemplates = useCallback(async () => {
     const tpls = await getAllTemplates();
@@ -1193,12 +1325,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setClipAnimation,
     applyAnimation,
     applyAnimationSequence,
+    applyRandomAnimation,
     clearClipAnimations,
     clearAllAnimations,
     toggleFavoriteAnimation,
+    setAnimationSpeed,
+    adjustClipSpeed,
+    resetClipSpeed,
     setTransition,
     applyTransition,
     clearAllTransitions,
+    setTransitionDuration,
+    videoExportState,
+    startVideoExport,
+    cancelVideoExport,
     exportVideo,
     importTemplate,
     templates,
