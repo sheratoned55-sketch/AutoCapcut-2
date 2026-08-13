@@ -1,6 +1,7 @@
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
-import { Clip, ClipAnimationConfig, VideoExportSettings, ResolutionPreset } from '../types';
+import { Clip, ClipAnimationConfig, ClipTransition, VideoExportSettings, ResolutionPreset, AspectRatio, ImageFit } from '../types';
 import { computeTransform, FrameTransform } from './animations';
+import { transitionLayers, transitionFlash, TRANS_NONE_ID } from './transitions';
 
 // ─────────────────────────────────────────────────────────────────
 // Canvas renderer + standalone MP4 exporter.
@@ -11,12 +12,30 @@ import { computeTransform, FrameTransform } from './animations';
 // with mp4-muxer. The same drawFrame() powers the live preview.
 // ─────────────────────────────────────────────────────────────────
 
-export const RESOLUTIONS: Record<ResolutionPreset, { w: number; h: number; label: string; bitrate: number }> = {
-  '480p': { w: 854, h: 480, label: '480p', bitrate: 2_500_000 },
-  '720p': { w: 1280, h: 720, label: '720p (HD)', bitrate: 5_000_000 },
-  '1080p': { w: 1920, h: 1080, label: '1080p (Full HD)', bitrate: 10_000_000 },
-  '2k': { w: 2560, h: 1440, label: '2K (QHD)', bitrate: 18_000_000 },
+// Resolution presets are anchored on the frame's SHORT side (height for
+// landscape). Actual width/height are derived from the chosen aspect ratio.
+export const RESOLUTIONS: Record<ResolutionPreset, { h: number; label: string; bitrate: number }> = {
+  '480p': { h: 480, label: '480p', bitrate: 2_500_000 },
+  '720p': { h: 720, label: '720p (HD)', bitrate: 5_000_000 },
+  '1080p': { h: 1080, label: '1080p (Full HD)', bitrate: 10_000_000 },
+  '2k': { h: 1440, label: '2K (QHD)', bitrate: 18_000_000 },
 };
+
+const ASPECT: Record<AspectRatio, [number, number]> = {
+  '16:9': [16, 9], '9:16': [9, 16], '1:1': [1, 1], '4:3': [4, 3],
+};
+
+/** Frame pixel dimensions for a resolution + aspect ratio (both even). */
+export function frameDims(resolution: ResolutionPreset, aspect: AspectRatio): { w: number; h: number } {
+  const base = RESOLUTIONS[resolution].h;
+  const [aw, ah] = ASPECT[aspect];
+  // Anchor the base on the taller side so portrait keeps its detail.
+  let h: number, w: number;
+  if (ah >= aw) { h = base * (aspect === '9:16' ? 16 / 9 : 1); w = Math.round((h * aw) / ah); }
+  else { h = base; w = Math.round((h * aw) / ah); }
+  const even = (n: number) => (Math.round(n) % 2 === 0 ? Math.round(n) : Math.round(n) + 1);
+  return { w: even(w), h: even(h) };
+}
 
 /** Anything the 2D canvas can draw from. */
 export type DrawSource = ImageBitmap | HTMLImageElement | HTMLVideoElement | HTMLCanvasElement | OffscreenCanvas;
@@ -32,8 +51,8 @@ function srcDims(src: DrawSource): { w: number; h: number } {
 }
 
 /**
- * Draw one composited frame: a black background, then the source scaled to
- * "cover" the canvas, with the animation transform applied about the centre.
+ * Draw one composited layer: optionally a black background, then the source
+ * fitted to the frame with the given transform applied about the centre.
  */
 export function drawFrame(
   ctx: Ctx2D,
@@ -41,22 +60,29 @@ export function drawFrame(
   transform: FrameTransform,
   W: number,
   H: number,
+  fit: ImageFit = 'cover',
+  clearBg = true,
 ): void {
-  // Opaque black background (letterbox + transparent-PNG safety).
-  ctx.save();
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, W, H);
-  ctx.restore();
+  if (clearBg) {
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
 
   if (!src) return;
 
   const { w: sw, h: sh } = srcDims(src);
   if (sw <= 0 || sh <= 0) return;
 
-  const cover = Math.max(W / sw, H / sh);
-  const dw = sw * cover;
-  const dh = sh * cover;
+  let dw: number, dh: number;
+  if (fit === 'fill') {
+    dw = W; dh = H;
+  } else {
+    const f = fit === 'contain' ? Math.min(W / sw, H / sh) : Math.max(W / sw, H / sh);
+    dw = sw * f; dh = sh * f;
+  }
 
   ctx.save();
   ctx.globalAlpha = Math.max(0, Math.min(1, transform.opacity));
@@ -84,26 +110,63 @@ export function clipKey(clip: Clip): string {
   return clip.media.id;
 }
 
-/** Render a single clip's frame for the live preview canvas. */
-export function renderPreviewFrame(
-  ctx: Ctx2D,
-  clip: Clip | null,
-  src: DrawSource | null,
-  globalTime: number,
-  cfg: ClipAnimationConfig | undefined,
-  W: number,
-  H: number,
-): void {
+export interface TimelineRenderCtx {
+  clips: Clip[];
+  animCfgs: Record<string, ClipAnimationConfig>;
+  transitions: Record<string, ClipTransition>;
+  /** resolve the drawable source for a media id (image bitmap or video element) */
+  getSource: (mediaId: string) => DrawSource | null;
+  W: number;
+  H: number;
+  fit: ImageFit;
+}
+
+/**
+ * The one function that composites a full timeline frame — animation +
+ * transitions + fit. Shared by the live preview and the MP4 exporter so the
+ * preview is a faithful proof of the export.
+ */
+export function renderTimelineFrame(ctx: Ctx2D, time: number, r: TimelineRenderCtx): void {
+  const clip = clipAt(r.clips, time);
   if (!clip) {
-    ctx.save();
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, W, H);
-    ctx.restore();
+    ctx.save(); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, r.W, r.H); ctx.restore();
     return;
   }
-  const localTime = globalTime - clip.start;
-  const transform = computeTransform(cfg, localTime, clip.duration);
-  drawFrame(ctx, src, transform, W, H);
+  const idx = r.clips.indexOf(clip);
+  const tcfg = r.transitions?.[clip.media.id];
+
+  // Inside a transition window at the start of this clip → composite prev+curr.
+  if (tcfg && tcfg.transId !== TRANS_NONE_ID && tcfg.duration > 0 && idx > 0 && time < clip.start + tcfg.duration) {
+    const prev = r.clips[idx - 1];
+    const p = (time - clip.start) / tcfg.duration;
+    // black base
+    ctx.save(); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, r.W, r.H); ctx.restore();
+    for (const layer of transitionLayers(tcfg.transId, p)) {
+      const c = layer.which === 'prev' ? prev : clip;
+      const localT = layer.which === 'prev'
+        ? Math.min(time - prev.start, prev.duration)
+        : time - clip.start;
+      const base = computeTransform(r.animCfgs[c.media.id], localT, c.duration);
+      const merged: FrameTransform = {
+        scale: base.scale * layer.scale,
+        translateX: base.translateX + layer.dx,
+        translateY: base.translateY + layer.dy,
+        rotate: base.rotate,
+        opacity: base.opacity * layer.alpha,
+      };
+      drawFrame(ctx, r.getSource(c.media.id), merged, r.W, r.H, r.fit, false);
+    }
+    const flash = transitionFlash(tcfg.transId, p);
+    if (flash && flash.alpha > 0) {
+      ctx.save(); ctx.globalAlpha = Math.min(1, flash.alpha); ctx.fillStyle = flash.color;
+      ctx.fillRect(0, 0, r.W, r.H); ctx.restore();
+    }
+    return;
+  }
+
+  // Normal single-clip frame.
+  const transform = computeTransform(r.animCfgs[clip.media.id], time - clip.start, clip.duration);
+  drawFrame(ctx, r.getSource(clip.media.id), transform, r.W, r.H, r.fit, true);
 }
 
 // ─── MP4 export ──────────────────────────────────────────────────
@@ -114,6 +177,7 @@ export interface VideoExportInput {
   clips: Clip[];
   audioDuration: number;
   clipAnimations: Record<string, ClipAnimationConfig>;
+  transitions?: Record<string, ClipTransition>;
   /** decoded images keyed by media id */
   imageBitmaps: Map<string, DrawSource>;
   /** optional seekable <video> elements keyed by media id */
@@ -167,8 +231,10 @@ export async function exportVideo(input: VideoExportInput): Promise<Blob> {
   }
 
   const { clips, audioDuration, clipAnimations, imageBitmaps, videoElements, audioBuffer, settings } = input;
+  const transitions = input.transitions || {};
+  const fit: ImageFit = settings.imageFit || 'cover';
   const res = RESOLUTIONS[settings.resolution];
-  const W = res.w, H = res.h;
+  const { w: W, h: H } = frameDims(settings.resolution, settings.aspectRatio || '16:9');
   const fps = settings.fps;
   const total = Math.max(audioDuration, clips.reduce((m, c) => Math.max(m, c.start + c.duration), 0));
   if (total <= 0) throw new Error('Nothing to export — the timeline is empty.');
@@ -181,7 +247,8 @@ export async function exportVideo(input: VideoExportInput): Promise<Blob> {
   const canvas: any = typeof OffscreenCanvas !== 'undefined'
     ? new OffscreenCanvas(W, H)
     : Object.assign(document.createElement('canvas'), { width: W, height: H });
-  const ctx = canvas.getContext('2d') as Ctx2D;
+  // alpha:false lets the compositor skip per-pixel blending work — faster.
+  const ctx = canvas.getContext('2d', { alpha: false }) as Ctx2D;
   if (!ctx) throw new Error('Could not create a 2D canvas context for rendering.');
 
   // Audio config
@@ -210,49 +277,50 @@ export async function exportVideo(input: VideoExportInput): Promise<Blob> {
   });
   videoEncoder.configure({ codec, width: W, height: H, bitrate: res.bitrate, framerate: fps });
 
+  // Source provider for the unified renderer.
+  const getSource = (mediaId: string): DrawSource | null =>
+    imageBitmaps.get(mediaId) || videoElements?.get(mediaId) || null;
+  const renderCtx: TimelineRenderCtx = { clips, animCfgs: clipAnimations, transitions, getSource, W, H, fit };
+
   // ── Video frames ──
   const frameDurUs = 1_000_000 / fps;
-  let lastSeekedVideoId = '';
+  let lastYield = performance.now();
   for (let i = 0; i < totalFrames; i++) {
-    checkCancel();
     if (encoderError) throw new Error(`Video encoder error: ${encoderError.message || encoderError}`);
 
     const time = i / fps;
-    const clip = clipAt(clips, time);
-    let src: DrawSource | null = null;
-    if (clip) {
-      if (clip.isImage) {
-        src = imageBitmaps.get(clip.media.id) || null;
-      } else {
-        const v = videoElements?.get(clip.media.id) || null;
-        if (v) {
-          const seekTarget = clip.sourceTrimStart + (time - clip.start);
-          if (clip.media.id !== lastSeekedVideoId || Math.abs(v.currentTime - seekTarget) > 0.05) {
-            await seekVideo(v, seekTarget);
-            lastSeekedVideoId = clip.media.id;
-          }
-          src = v;
-        }
+    // Seek the current clip's video (if any) so it shows the right frame.
+    const cur = clipAt(clips, time);
+    if (cur && !cur.isImage) {
+      const v = videoElements?.get(cur.media.id);
+      if (v) {
+        const seekTarget = cur.sourceTrimStart + (time - cur.start);
+        if (Math.abs(v.currentTime - seekTarget) > 0.06) await seekVideo(v, seekTarget);
       }
     }
-    const cfg = clip ? clipAnimations[clip.media.id] : undefined;
-    const transform = clip ? computeTransform(cfg, time - clip.start, clip.duration) : { scale: 1, translateX: 0, translateY: 0, rotate: 0, opacity: 1 };
-    drawFrame(ctx, src, transform, W, H);
+
+    renderTimelineFrame(ctx, time, renderCtx);
 
     const frame = new VideoFrameCtor(canvas, { timestamp: Math.round(i * frameDurUs), duration: Math.round(frameDurUs) });
+    // Keyframe every 2s for good seeking without bloating size.
     videoEncoder.encode(frame, { keyFrame: i % (fps * 2) === 0 });
     frame.close();
 
-    // Backpressure + keep the UI responsive.
-    if (videoEncoder.encodeQueueSize > 8) {
-      while (videoEncoder.encodeQueueSize > 4) {
-        await new Promise((r) => setTimeout(r, 4));
+    // Backpressure: let the encoder drain if its queue grows too deep.
+    if (videoEncoder.encodeQueueSize > 30) {
+      while (videoEncoder.encodeQueueSize > 10) {
+        await new Promise((r) => setTimeout(r));
         checkCancel();
       }
     }
-    if (i % 10 === 0) {
+    // Yield roughly every 120ms of wall-clock so the UI/progress stay live
+    // without the per-frame await overhead that made exports crawl.
+    const now = performance.now();
+    if (now - lastYield > 120) {
       report((i / totalFrames) * 0.8, `Rendering video — frame ${i + 1}/${totalFrames}`);
-      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r));
+      checkCancel();
+      lastYield = performance.now();
     }
   }
   await videoEncoder.flush();

@@ -116,11 +116,24 @@ export interface ClipAnimationConfig {
   combo?: ClipAnim;
 }
 
+/** A transition that plays at the START of a clip, blending it with the previous one. */
+export interface ClipTransition {
+  /** references a TransitionDef.id */
+  transId: string;
+  /** length of the transition in seconds */
+  duration: number;
+}
+
 export type ResolutionPreset = '480p' | '720p' | '1080p' | '2k';
+export type AspectRatio = '16:9' | '9:16' | '1:1' | '4:3';
+/** How each image fills the frame. */
+export type ImageFit = 'cover' | 'contain' | 'fill';
 
 export interface VideoExportSettings {
   resolution: ResolutionPreset;
   fps: 30 | 60;
+  aspectRatio: AspectRatio;
+  imageFit: ImageFit;
 }
 
 export interface Project {
@@ -142,6 +155,8 @@ export interface Project {
   capcutDraftsPath?: string;
   /** Per-clip animation assignments, keyed by media id (stable across retime). */
   clipAnimations?: Record<string, ClipAnimationConfig>;
+  /** Per-clip transitions (plays at the clip's start), keyed by media id. */
+  transitions?: Record<string, ClipTransition>;
   /** Standalone MP4 export settings. */
   videoExport?: VideoExportSettings;
 }
@@ -186,4 +201,6 @@ export interface AppSettings {
   /** Shift all image/segment start times earlier by this many seconds. Increase
    *  if images change too late; negative moves them later. Default 0. */
   imageOffsetSec?: number;
+  /** Ids of animations the user has starred as favorites. */
+  favoriteAnimations?: string[];
 }
