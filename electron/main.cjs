@@ -47,6 +47,42 @@ ipcMain.handle('pick-export-dir', async () => {
 });
 ipcMain.handle('reveal-path', (_e, p) => { if (p) shell.showItemInFolder(p); });
 
+// ─── Streaming export to disk (memory-safe for long videos) ──────
+let exportFd = null;
+let exportSavePath = null;
+
+function closeExportFd() {
+  if (exportFd !== null) { try { fs.closeSync(exportFd); } catch { /* ignore */ } exportFd = null; }
+}
+
+ipcMain.handle('export-stream-open', (_e, { filename }) => {
+  closeExportFd();
+  const dir = exportDir || defaultExportDir();
+  fs.mkdirSync(dir, { recursive: true });
+  exportSavePath = path.join(dir, filename);
+  exportFd = fs.openSync(exportSavePath, 'w');
+  return exportSavePath;
+});
+ipcMain.handle('export-stream-write', (_e, { chunk, position }) => {
+  if (exportFd === null) throw new Error('No export file is open');
+  const buf = Buffer.from(chunk); // chunk arrives as a Uint8Array/ArrayBuffer
+  // Explicit position makes writes order-independent; throws ENOSPC if full.
+  fs.writeSync(exportFd, buf, 0, buf.length, position);
+  return true;
+});
+ipcMain.handle('export-stream-close', () => {
+  closeExportFd();
+  const p = exportSavePath;
+  if (p) shell.showItemInFolder(p);
+  return p;
+});
+ipcMain.handle('export-stream-abort', () => {
+  closeExportFd();
+  try { if (exportSavePath) fs.unlinkSync(exportSavePath); } catch { /* ignore */ }
+  exportSavePath = null;
+  return true;
+});
+
 ipcMain.handle('native-available', () => {
   try {
     return fs.existsSync(nativeBinPath()) && fs.existsSync(nativeModelPath());

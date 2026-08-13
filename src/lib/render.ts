@@ -1,4 +1,4 @@
-import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
+import { Muxer, ArrayBufferTarget, StreamTarget } from 'mp4-muxer';
 import { Clip, ClipAnimationConfig, ClipTransition, VideoExportSettings, ResolutionPreset, AspectRatio, ImageFit } from '../types';
 import { computeTransform, FrameTransform } from './animations';
 import { transitionLayers, transitionFlash, TRANS_NONE_ID } from './transitions';
@@ -200,6 +200,12 @@ export interface VideoExportInput {
   settings: VideoExportSettings;
   onProgress?: (fraction: number, message: string) => void;
   signal?: CancelSignal;
+  /**
+   * When provided, the MP4 is streamed to disk chunk-by-chunk through this
+   * sink instead of being buffered in memory — no giant Blob/ArrayBuffer, so
+   * long videos don't exhaust RAM. Returns null (the file is already written).
+   */
+  nativeSink?: { write: (chunk: Uint8Array, position: number) => Promise<unknown> };
 }
 
 export function webCodecsAvailable(): boolean {
@@ -238,7 +244,7 @@ function seekVideo(video: HTMLVideoElement, time: number): Promise<void> {
  * assigned animations; audio (all parts, already concatenated) is AAC-encoded
  * and muxed in.
  */
-export async function exportVideo(input: VideoExportInput): Promise<Blob> {
+export async function exportVideo(input: VideoExportInput): Promise<Blob | null> {
   if (!webCodecsAvailable()) {
     throw new Error('In-app video encoding needs WebCodecs (Chromium / the desktop app). Please export from the AutoCapcut desktop app.');
   }
@@ -269,13 +275,25 @@ export async function exportVideo(input: VideoExportInput): Promise<Blob> {
   const sampleRate = hasAudio ? audioBuffer!.sampleRate : 48000;
   const channels = hasAudio ? Math.min(audioBuffer!.numberOfChannels, 2) : 2;
 
-  // Muxer
-  const target = new ArrayBufferTarget();
+  // Muxer — stream straight to disk when a native sink is given (memory-safe
+  // for long videos), otherwise buffer in memory and return a Blob.
+  const streaming = !!input.nativeSink;
+  const pendingWrites: Promise<unknown>[] = [];
+  const target: any = streaming
+    ? new StreamTarget({
+        onData: (data: Uint8Array, position: number) => {
+          const copy = data.slice(); // data is a reused view — own it before async write
+          scrubBytes(copy);
+          pendingWrites.push(input.nativeSink!.write(copy, position));
+        },
+        chunked: true,
+      })
+    : new ArrayBufferTarget();
   const muxer = new Muxer({
     target,
     video: { codec: 'avc', width: W, height: H, frameRate: fps },
     ...(hasAudio ? { audio: { codec: 'aac', numberOfChannels: channels, sampleRate } } : {}),
-    fastStart: 'in-memory',
+    fastStart: streaming ? false : 'in-memory',
   } as any);
 
   // Encoders
@@ -333,10 +351,14 @@ export async function exportVideo(input: VideoExportInput): Promise<Blob> {
       report((i / totalFrames) * 0.8, `Rendering video — frame ${i + 1}/${totalFrames}`);
       await new Promise((r) => setTimeout(r));
       checkCancel();
+      // Flush queued disk writes so streamed chunks don't pile up in memory
+      // (and so a disk-full error surfaces promptly).
+      if (streaming && pendingWrites.length > 24) await Promise.all(pendingWrites.splice(0));
       lastYield = performance.now();
     }
   }
   await videoEncoder.flush();
+  if (streaming) await Promise.all(pendingWrites.splice(0));
   report(0.85, 'Video track done');
 
   // ── Audio ──
@@ -387,8 +409,13 @@ export async function exportVideo(input: VideoExportInput): Promise<Blob> {
 
   report(0.97, 'Finalizing MP4…');
   muxer.finalize();
+  if (streaming) {
+    await Promise.all(pendingWrites.splice(0));
+    report(1, 'Done');
+    return null; // already written to disk
+  }
   const buffer: ArrayBuffer = (target as any).buffer;
-  scrubFingerprint(buffer);
+  scrubBytes(new Uint8Array(buffer));
   report(1, 'Done');
   return new Blob([buffer], { type: 'video/mp4' });
 }
@@ -396,9 +423,9 @@ export async function exportVideo(input: VideoExportInput): Promise<Blob> {
 // The muxer writes its own name ("mp4-muxer-hdlr") into each track's handler
 // box — a tool fingerprint. Overwrite it in-place with a neutral, generic ISO
 // handler name (same byte length, so box sizes stay valid). We do not fake any
-// other editor's identity; we only remove the machine tag.
-function scrubFingerprint(buffer: ArrayBuffer): void {
-  const bytes = new Uint8Array(buffer);
+// other editor's identity; we only remove the machine tag. Works on any byte
+// range, so it also cleans individual streamed chunks.
+function scrubBytes(bytes: Uint8Array): void {
   const needle = 'mp4-muxer-hdlr';
   const replacement = 'ISO Media file'; // exactly 14 chars, same as the needle
   const find = [...needle].map((c) => c.charCodeAt(0));
