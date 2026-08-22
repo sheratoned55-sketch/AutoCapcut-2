@@ -384,9 +384,20 @@ export async function exportVideo(input: VideoExportInput): Promise<Blob | null>
         if (audioErr) throw new Error(`Audio encoder error: ${audioErr.message || audioErr}`);
         const n = Math.min(chunkFrames, totalSamples - offset);
         // planar f32: [ch0 samples..., ch1 samples...]
+        const vol = settings.audioVolume ?? 1;
         const planar = new Float32Array(n * channels);
         for (let c = 0; c < channels; c++) {
-          planar.set(chData[c].subarray(offset, offset + n), c * n);
+          const srcCh = chData[c].subarray(offset, offset + n);
+          if (vol === 1) {
+            planar.set(srcCh, c * n);
+          } else {
+            const base = c * n;
+            for (let i = 0; i < n; i++) {
+              let s = srcCh[i] * vol;
+              if (s > 1) s = 1; else if (s < -1) s = -1; // clamp so louder never distorts
+              planar[base + i] = s;
+            }
+          }
         }
         const audioData = new AudioDataCtor({
           format: 'f32-planar',

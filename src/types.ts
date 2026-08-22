@@ -136,6 +136,8 @@ export interface VideoExportSettings {
   fps: 30 | 60;
   aspectRatio: AspectRatio;
   imageFit: ImageFit;
+  /** Voiceover volume multiplier (1 = original). Quality-preserving gain. */
+  audioVolume?: number;
 }
 
 export interface Project {

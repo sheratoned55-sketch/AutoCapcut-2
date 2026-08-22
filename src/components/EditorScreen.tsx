@@ -152,18 +152,24 @@ export function EditorScreen() {
       <PipelinePanel />
 
       {/* Tabs */}
-      <div className="flex items-center gap-1 px-4 border-b border-neutral-800 bg-neutral-900">
-        {(['segments', 'timeline', 'animation', 'preview', 'export'] as const).map(tab => (
+      <div className="flex items-center gap-1 px-4 border-b border-neutral-800 bg-neutral-900 overflow-x-auto">
+        {([
+          { id: 'segments', label: 'Script', Icon: FileImage },
+          { id: 'timeline', label: 'Timeline', Icon: Clock },
+          { id: 'animation', label: 'Animation', Icon: Sparkles },
+          { id: 'preview', label: 'Preview', Icon: Play },
+          { id: 'export', label: 'Export', Icon: Download },
+        ] as const).map(({ id, label, Icon }) => (
           <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`px-4 py-2.5 text-sm font-medium capitalize transition-colors border-b-2 ${
-              activeTab === tab
-                ? 'text-white border-blue-500'
+            key={id}
+            onClick={() => setActiveTab(id)}
+            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 whitespace-nowrap ${
+              activeTab === id
+                ? 'text-white border-purple-500'
                 : 'text-neutral-400 border-transparent hover:text-neutral-200'
             }`}
           >
-            {tab}
+            <Icon size={14} className={activeTab === id ? 'text-purple-400' : ''} /> {label}
           </button>
         ))}
       </div>
@@ -1533,6 +1539,7 @@ function VideoExportSection() {
   const [fps, setFps] = useState<30 | 60>(30);
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
   const [imageFit, setImageFit] = useState<ImageFit>('cover');
+  const [audioVolume, setAudioVolume] = useState(1);
   const exporting = !!store.videoExportState?.active;
 
   useEffect(() => {
@@ -1541,6 +1548,7 @@ function VideoExportSection() {
       setFps(project.videoExport.fps);
       if (project.videoExport.aspectRatio) setAspectRatio(project.videoExport.aspectRatio);
       if (project.videoExport.imageFit) setImageFit(project.videoExport.imageFit);
+      if (typeof project.videoExport.audioVolume === 'number') setAudioVolume(project.videoExport.audioVolume);
     }
   }, [project?.id]);
 
@@ -1548,7 +1556,7 @@ function VideoExportSection() {
   const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'Untitled';
 
   const handleExport = () => {
-    store.startVideoExport({ resolution, fps, aspectRatio, imageFit });
+    store.startVideoExport({ resolution, fps, aspectRatio, imageFit, audioVolume });
   };
 
   const res = RESOLUTIONS[resolution];
@@ -1613,6 +1621,18 @@ function VideoExportSection() {
                 {f} fps
               </button>
             ))}
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-neutral-400 mb-1">Voice volume</label>
+          <div className="flex items-center gap-2 h-[38px]">
+            <input
+              type="range" min="0" max="3" step="0.1" value={audioVolume}
+              onChange={(e) => setAudioVolume(parseFloat(e.target.value))}
+              className="w-32 accent-purple-500"
+            />
+            <span className="text-xs text-white font-mono w-10 text-right tabular-nums">{Math.round(audioVolume * 100)}%</span>
+            {audioVolume !== 1 && <button onClick={() => setAudioVolume(1)} className="text-[11px] text-neutral-400 hover:text-neutral-200 border border-neutral-700 rounded px-1.5 py-0.5">reset</button>}
           </div>
         </div>
       </div>
