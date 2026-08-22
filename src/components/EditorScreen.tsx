@@ -152,18 +152,24 @@ export function EditorScreen() {
       <PipelinePanel />
 
       {/* Tabs */}
-      <div className="flex items-center gap-1 px-4 border-b border-neutral-800 bg-neutral-900">
-        {(['segments', 'timeline', 'animation', 'preview', 'export'] as const).map(tab => (
+      <div className="flex items-center gap-1 px-4 border-b border-neutral-800 bg-neutral-900 overflow-x-auto">
+        {([
+          { id: 'segments', label: 'Script', Icon: FileImage },
+          { id: 'timeline', label: 'Timeline', Icon: Clock },
+          { id: 'animation', label: 'Animation', Icon: Sparkles },
+          { id: 'preview', label: 'Preview', Icon: Play },
+          { id: 'export', label: 'Export', Icon: Download },
+        ] as const).map(({ id, label, Icon }) => (
           <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`px-4 py-2.5 text-sm font-medium capitalize transition-colors border-b-2 ${
-              activeTab === tab
-                ? 'text-white border-blue-500'
+            key={id}
+            onClick={() => setActiveTab(id)}
+            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 whitespace-nowrap ${
+              activeTab === id
+                ? 'text-white border-purple-500'
                 : 'text-neutral-400 border-transparent hover:text-neutral-200'
             }`}
           >
-            {tab}
+            <Icon size={14} className={activeTab === id ? 'text-purple-400' : ''} /> {label}
           </button>
         ))}
       </div>
@@ -560,50 +566,66 @@ function AnimPreviewCanvas({ animId, imgUrl, size = 72, loopSec = 2.2 }: { animI
   const imgRef = useRef<HTMLImageElement | null>(null);
   const rafRef = useRef<number>(0);
   const startRef = useRef<number>(0);
+  const [hover, setHover] = useState(false);
 
-  useEffect(() => {
-    if (imgUrl) {
-      const img = new Image();
-      img.onload = () => { imgRef.current = img; };
-      img.src = imgUrl;
-    } else {
-      imgRef.current = null;
-    }
-  }, [imgUrl]);
-
-  useEffect(() => {
+  // Draw one frame at progress t (0..1 over the loop). Only the hovered tile
+  // runs a rAF loop — the rest hold a single static frame, so a grid of dozens
+  // of previews stays light on CPU/RAM (important on low-end PCs).
+  const drawAt = useCallback((t: number) => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+    const cat = getAnim(animId)?.category;
+    const cfg = cat === 'combo'
+      ? { combo: { animId, duration: loopSec, fullDuration: true } }
+      : cat === 'out'
+        ? { out: { animId, duration: loopSec, fullDuration: false } }
+        : { in: { animId, duration: loopSec * 0.6, fullDuration: false } };
+    const transform = computeTransform(cfg as any, t * loopSec, loopSec);
+    let src: any = imgRef.current;
+    if (!src) {
+      const g = ctx.createLinearGradient(0, 0, size, size);
+      g.addColorStop(0, '#3b3f6b'); g.addColorStop(1, '#7c3aed');
+      const tmp = document.createElement('canvas'); tmp.width = size; tmp.height = size;
+      const tctx = tmp.getContext('2d')!; tctx.fillStyle = g; tctx.fillRect(0, 0, size, size);
+      tctx.fillStyle = 'rgba(255,255,255,0.9)'; tctx.font = `${size * 0.5}px sans-serif`;
+      tctx.textAlign = 'center'; tctx.textBaseline = 'middle'; tctx.fillText('▧', size / 2, size / 2);
+      src = tmp;
+    }
+    drawFrame(ctx, src, transform, size, size);
+  }, [animId, size, loopSec]);
+
+  useEffect(() => {
+    if (!hover) { drawAt(getAnim(animId)?.category === 'out' ? 0 : 1); return; } // static rest frame
     startRef.current = performance.now();
     const draw = () => {
-      const t = ((performance.now() - startRef.current) / 1000) % loopSec;
-      const cfg = getAnim(animId)?.category === 'combo'
-        ? { combo: { animId, duration: loopSec, fullDuration: true } }
-        : getAnim(animId)?.category === 'out'
-          ? { out: { animId, duration: loopSec, fullDuration: false } }
-          : { in: { animId, duration: loopSec * 0.6, fullDuration: false } };
-      const transform = computeTransform(cfg as any, t, loopSec);
-      let src: any = imgRef.current;
-      if (!src) {
-        // gradient placeholder
-        const g = ctx.createLinearGradient(0, 0, size, size);
-        g.addColorStop(0, '#3b3f6b'); g.addColorStop(1, '#7c3aed');
-        const tmp = document.createElement('canvas'); tmp.width = size; tmp.height = size;
-        const tctx = tmp.getContext('2d')!; tctx.fillStyle = g; tctx.fillRect(0, 0, size, size);
-        tctx.fillStyle = 'rgba(255,255,255,0.9)'; tctx.font = `${size * 0.5}px sans-serif`;
-        tctx.textAlign = 'center'; tctx.textBaseline = 'middle'; tctx.fillText('▧', size / 2, size / 2);
-        src = tmp;
-      }
-      drawFrame(ctx, src, transform, size, size);
+      const t = (((performance.now() - startRef.current) / 1000) % loopSec) / loopSec;
+      drawAt(t);
       rafRef.current = requestAnimationFrame(draw);
     };
     rafRef.current = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [animId, size, loopSec]);
+  }, [hover, drawAt, animId, loopSec]);
 
-  return <canvas ref={canvasRef} width={size} height={size} className="rounded-md bg-black w-full h-full object-cover" />;
+  // Repaint the static frame once the image finishes loading.
+  useEffect(() => {
+    if (!imgUrl) { drawAt(getAnim(animId)?.category === 'out' ? 0 : 1); return; }
+    const img = new Image();
+    img.onload = () => { imgRef.current = img; if (!hover) drawAt(getAnim(animId)?.category === 'out' ? 0 : 1); };
+    img.src = imgUrl;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imgUrl]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={size}
+      height={size}
+      onPointerEnter={() => setHover(true)}
+      onPointerLeave={() => setHover(false)}
+      className="rounded-md bg-black w-full h-full object-cover"
+    />
+  );
 }
 
 // ─── Timeline Panel ───────────────────────────────────────────
@@ -1517,6 +1539,7 @@ function VideoExportSection() {
   const [fps, setFps] = useState<30 | 60>(30);
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
   const [imageFit, setImageFit] = useState<ImageFit>('cover');
+  const [audioVolume, setAudioVolume] = useState(1);
   const exporting = !!store.videoExportState?.active;
 
   useEffect(() => {
@@ -1525,6 +1548,7 @@ function VideoExportSection() {
       setFps(project.videoExport.fps);
       if (project.videoExport.aspectRatio) setAspectRatio(project.videoExport.aspectRatio);
       if (project.videoExport.imageFit) setImageFit(project.videoExport.imageFit);
+      if (typeof project.videoExport.audioVolume === 'number') setAudioVolume(project.videoExport.audioVolume);
     }
   }, [project?.id]);
 
@@ -1532,7 +1556,7 @@ function VideoExportSection() {
   const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'Untitled';
 
   const handleExport = () => {
-    store.startVideoExport({ resolution, fps, aspectRatio, imageFit });
+    store.startVideoExport({ resolution, fps, aspectRatio, imageFit, audioVolume });
   };
 
   const res = RESOLUTIONS[resolution];
@@ -1597,6 +1621,18 @@ function VideoExportSection() {
                 {f} fps
               </button>
             ))}
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-neutral-400 mb-1">Voice volume</label>
+          <div className="flex items-center gap-2 h-[38px]">
+            <input
+              type="range" min="0" max="3" step="0.1" value={audioVolume}
+              onChange={(e) => setAudioVolume(parseFloat(e.target.value))}
+              className="w-32 accent-purple-500"
+            />
+            <span className="text-xs text-white font-mono w-10 text-right tabular-nums">{Math.round(audioVolume * 100)}%</span>
+            {audioVolume !== 1 && <button onClick={() => setAudioVolume(1)} className="text-[11px] text-neutral-400 hover:text-neutral-200 border border-neutral-700 rounded px-1.5 py-0.5">reset</button>}
           </div>
         </div>
       </div>
