@@ -560,50 +560,66 @@ function AnimPreviewCanvas({ animId, imgUrl, size = 72, loopSec = 2.2 }: { animI
   const imgRef = useRef<HTMLImageElement | null>(null);
   const rafRef = useRef<number>(0);
   const startRef = useRef<number>(0);
+  const [hover, setHover] = useState(false);
 
-  useEffect(() => {
-    if (imgUrl) {
-      const img = new Image();
-      img.onload = () => { imgRef.current = img; };
-      img.src = imgUrl;
-    } else {
-      imgRef.current = null;
-    }
-  }, [imgUrl]);
-
-  useEffect(() => {
+  // Draw one frame at progress t (0..1 over the loop). Only the hovered tile
+  // runs a rAF loop — the rest hold a single static frame, so a grid of dozens
+  // of previews stays light on CPU/RAM (important on low-end PCs).
+  const drawAt = useCallback((t: number) => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+    const cat = getAnim(animId)?.category;
+    const cfg = cat === 'combo'
+      ? { combo: { animId, duration: loopSec, fullDuration: true } }
+      : cat === 'out'
+        ? { out: { animId, duration: loopSec, fullDuration: false } }
+        : { in: { animId, duration: loopSec * 0.6, fullDuration: false } };
+    const transform = computeTransform(cfg as any, t * loopSec, loopSec);
+    let src: any = imgRef.current;
+    if (!src) {
+      const g = ctx.createLinearGradient(0, 0, size, size);
+      g.addColorStop(0, '#3b3f6b'); g.addColorStop(1, '#7c3aed');
+      const tmp = document.createElement('canvas'); tmp.width = size; tmp.height = size;
+      const tctx = tmp.getContext('2d')!; tctx.fillStyle = g; tctx.fillRect(0, 0, size, size);
+      tctx.fillStyle = 'rgba(255,255,255,0.9)'; tctx.font = `${size * 0.5}px sans-serif`;
+      tctx.textAlign = 'center'; tctx.textBaseline = 'middle'; tctx.fillText('▧', size / 2, size / 2);
+      src = tmp;
+    }
+    drawFrame(ctx, src, transform, size, size);
+  }, [animId, size, loopSec]);
+
+  useEffect(() => {
+    if (!hover) { drawAt(getAnim(animId)?.category === 'out' ? 0 : 1); return; } // static rest frame
     startRef.current = performance.now();
     const draw = () => {
-      const t = ((performance.now() - startRef.current) / 1000) % loopSec;
-      const cfg = getAnim(animId)?.category === 'combo'
-        ? { combo: { animId, duration: loopSec, fullDuration: true } }
-        : getAnim(animId)?.category === 'out'
-          ? { out: { animId, duration: loopSec, fullDuration: false } }
-          : { in: { animId, duration: loopSec * 0.6, fullDuration: false } };
-      const transform = computeTransform(cfg as any, t, loopSec);
-      let src: any = imgRef.current;
-      if (!src) {
-        // gradient placeholder
-        const g = ctx.createLinearGradient(0, 0, size, size);
-        g.addColorStop(0, '#3b3f6b'); g.addColorStop(1, '#7c3aed');
-        const tmp = document.createElement('canvas'); tmp.width = size; tmp.height = size;
-        const tctx = tmp.getContext('2d')!; tctx.fillStyle = g; tctx.fillRect(0, 0, size, size);
-        tctx.fillStyle = 'rgba(255,255,255,0.9)'; tctx.font = `${size * 0.5}px sans-serif`;
-        tctx.textAlign = 'center'; tctx.textBaseline = 'middle'; tctx.fillText('▧', size / 2, size / 2);
-        src = tmp;
-      }
-      drawFrame(ctx, src, transform, size, size);
+      const t = (((performance.now() - startRef.current) / 1000) % loopSec) / loopSec;
+      drawAt(t);
       rafRef.current = requestAnimationFrame(draw);
     };
     rafRef.current = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [animId, size, loopSec]);
+  }, [hover, drawAt, animId, loopSec]);
 
-  return <canvas ref={canvasRef} width={size} height={size} className="rounded-md bg-black w-full h-full object-cover" />;
+  // Repaint the static frame once the image finishes loading.
+  useEffect(() => {
+    if (!imgUrl) { drawAt(getAnim(animId)?.category === 'out' ? 0 : 1); return; }
+    const img = new Image();
+    img.onload = () => { imgRef.current = img; if (!hover) drawAt(getAnim(animId)?.category === 'out' ? 0 : 1); };
+    img.src = imgUrl;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imgUrl]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={size}
+      height={size}
+      onPointerEnter={() => setHover(true)}
+      onPointerLeave={() => setHover(false)}
+      className="rounded-md bg-black w-full h-full object-cover"
+    />
+  );
 }
 
 // ─── Timeline Panel ───────────────────────────────────────────
